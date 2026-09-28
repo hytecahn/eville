@@ -14,7 +14,12 @@ import traceback
 from logging.handlers import TimedRotatingFileHandler
 
 from threading import Thread
-from queue import Queue
+from queue import Queue, Empty, Full
+from types import SimpleNamespace
+import signal
+import faulthandler
+import math
+from runtime import bounded_call, heartbeat_loop, cancel_tasks
 
 # DEVICE 별 패킷 정보
 RS485_DEVICE = {
@@ -166,17 +171,21 @@ def init_diagnostic_logging(config):
     log_file = config.get('diagnostic_log_file', '/share/simple_mqtt_ezville_control.log')
     backup_count = config.get('diagnostic_log_days', 90)
 
-    directory = os.path.dirname(log_file)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-
-    handler = TimedRotatingFileHandler(
-        log_file, when='midnight', backupCount=backup_count, encoding='utf-8'
-    )
-    handler.setFormatter(logging.Formatter('%(message)s'))
-    handler.suffix = '%Y-%m-%d'
-    diagnostic_logger.handlers.clear()
-    diagnostic_logger.addHandler(handler)
+    try:
+        directory = os.path.dirname(log_file)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        handler = TimedRotatingFileHandler(
+            log_file, when='midnight', backupCount=backup_count, encoding='utf-8'
+        )
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        handler.suffix = '%Y-%m-%d'
+        for previous in diagnostic_logger.handlers:
+            previous.close()
+        diagnostic_logger.handlers.clear()
+        diagnostic_logger.addHandler(handler)
+    except OSError as error:
+        print('[WARNING] diagnostic file unavailable; console logging only: {}'.format(error), flush=True)
 
 
 # LOG 메시지
@@ -219,7 +228,44 @@ EW11_SEND_TOPIC = EW11_TOPIC + '/send'
 
 
 # Main Function
-def ezville_loop(config):
+def validate_command(topics, value):
+    if len(topics) != 4 or topics[0] != HA_TOPIC or topics[-1] != 'command':
+        raise ValueError('command topic shape')
+    parts = topics[1].split('_')
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        raise ValueError('device id')
+    if not (1 <= int(parts[1]) <= 9 and 1 <= int(parts[2]) <= 9):
+        raise ValueError('device address out of range')
+    device, action = parts[0], topics[2]
+    valid = {'light': {'power': ('ON', 'OFF')}, 'plug': {'power': ('ON', 'OFF')},
+             'gasvalve': {'power': ('OFF',)},
+             'thermostat': {'power': ('heat', 'off'), 'setTemp': None},
+             'batch': {'elevator-up': ('PRESS',), 'elevator-down': ('PRESS',)}}
+    if device not in valid or action not in valid[device]:
+        raise ValueError('unsupported command')
+    choices = valid[device][action]
+    if choices is not None and value not in choices:
+        raise ValueError('unsupported value')
+    if device == 'thermostat' and action == 'setTemp':
+        temperature = float(value)
+        if not math.isfinite(temperature) or not 5 <= temperature <= 40:
+            raise ValueError('temperature out of range')
+
+
+def valid_state_packet(name, packet):
+    length = int(packet[8:10], 16)
+    if name == 'thermostat':
+        return 7 <= length <= 21 and (length - 5) % 2 == 0
+    if name == 'light':
+        return 2 <= length <= 10
+    if name == 'plug':
+        return length >= 1 and 1 <= int(packet[10:12], 16) <= 9 and length >= 1 + 3 * int(packet[10:12], 16)
+    if name in ('gasvalve', 'batch'):
+        return length >= 2
+    return False
+
+
+async def ezville_loop(config):
     
     # Log 생성 Flag
     debug = config['DEBUG_LOG']
@@ -234,10 +280,10 @@ def ezville_loop(config):
     SOC_PORT = config['ew11_port']
     
     # EW11 혹은 HA 전달 메시지 저장소
-    MSG_QUEUE = Queue()
+    MSG_QUEUE = Queue(maxsize=1000)
     
     # EW11에 보낼 Command 및 예상 Acknowledge 패킷 
-    CMD_QUEUE = asyncio.Queue()
+    CMD_QUEUE = asyncio.Queue(maxsize=100)
     
     # State 저장용 공간
     DEVICE_STATE = {}
@@ -275,24 +321,29 @@ def ezville_loop(config):
     
     # EW11 동작상태 확인용 메시지 수신 시간 체크 주기 및 체크용 시간 변수
     EW11_TIMEOUT = config['ew11_timeout']
-    last_received_time = time.time()
+    last_received_time = time.monotonic()
 
     # Paho의 자동 재접속 스레드까지 멈춘 경우를 감지하기 위한 상태값
     MQTT_RECONNECT_TIMEOUT = 120
     mqtt_connected = False
     mqtt_disconnected_time = time.monotonic()
-    last_mqtt_message_time = time.time()
+    last_mqtt_message_time = time.monotonic()
     diagnostic_interval = config.get('diagnostic_interval', 600)
     restart_count = 0
     
     # Addon 먹통 상태 감지 및 자체 리셋 설정
-    last_command_time = time.time()
-    last_state_update_time = time.time()
+    last_command_time = time.monotonic()
+    last_state_update_time = time.monotonic()
+    last_valid_packet_time = time.monotonic()
     HEALTH_CHECK_INTERVAL = 60  # 60초마다 헬스 체크 실행
     HEALTH_CHECK_TIMEOUT = 300  # 300초(5분) 동안 활동이 없으면 먹통으로 판단
     
     # EW11 재시작 확인용 Flag
     restart_flag = False
+    soc = None
+    mqtt_client = None
+    shutdown = asyncio.Event()
+    session_loop = asyncio.get_running_loop()
   
     # MQTT Integration 활성화 확인 Flag - 단, 사용을 위해서는 MQTT Integration에서 Birth/Last Will Testament 설정 및 Retain 설정 필요
     MQTT_ONLINE = False
@@ -308,8 +359,13 @@ def ezville_loop(config):
     startup_delay = 0
   
 
+    def reset_discovery():
+        DEVICE_STATE.clear()
+        MSG_CACHE.clear()
+        DISCOVERY_LIST.clear()
+
     # MQTT 통신 연결 Callback
-    def on_connect(client, userdata, flags, rc):
+    def on_connect(client, userdata, flags, rc, properties):
         nonlocal mqtt_connected
         nonlocal mqtt_disconnected_time
 
@@ -317,6 +373,7 @@ def ezville_loop(config):
             mqtt_connected = True
             mqtt_disconnected_time = None
             log('[INFO] MQTT Broker 연결 성공')
+            session_loop.call_soon_threadsafe(reset_discovery)
             # Socket인 경우 MQTT 장치의 명령 관련과 MQTT Status (Birth/Last Will Testament) Topic만 구독
             if comm_mode == 'socket':
                 client.subscribe([(HA_TOPIC + '/#', 0), ('homeassistant/status', 0)])
@@ -327,12 +384,7 @@ def ezville_loop(config):
             else:
                 client.subscribe([(HA_TOPIC + '/#', 0), (EW11_TOPIC + '/recv', 0), (EW11_TOPIC + '/send', 1), ('homeassistant/status', 0)])
         else:
-            errcode = {1: 'Connection refused - incorrect protocol version',
-                       2: 'Connection refused - invalid client identifier',
-                       3: 'Connection refused - server unavailable',
-                       4: 'Connection refused - bad username or password',
-                       5: 'Connection refused - not authorised'}
-            log(errcode[rc])
+            log('[ERROR] MQTT connect rejected: {}'.format(rc))
          
         
     # MQTT 메시지 Callback
@@ -341,13 +393,15 @@ def ezville_loop(config):
         nonlocal MQTT_ONLINE
         nonlocal startup_delay
         nonlocal last_mqtt_message_time
+        nonlocal last_received_time
+        nonlocal restart_flag
 
-        last_mqtt_message_time = time.time()
+        last_mqtt_message_time = time.monotonic()
         
         if msg.topic == 'homeassistant/status':
             # Reboot Control 사용 시 MQTT Integration의 Birth/Last Will Testament Topic은 바로 처리
             if REBOOT_CONTROL:
-                status = msg.payload.decode('utf-8')
+                status = msg.payload.decode('utf-8', errors='replace')
                 
                 if status == 'online':
                     log('[INFO] MQTT Integration 온라인')
@@ -359,12 +413,25 @@ def ezville_loop(config):
                     log('[INFO] MQTT Integration 오프라인')
                     MQTT_ONLINE = False
         # 나머지 topic은 모두 Queue에 보관
-        else:
-            MSG_QUEUE.put(msg)
+        elif msg.topic == EW11_TOPIC + '/recv' or (
+                msg.topic.startswith(HA_TOPIC + '/') and msg.topic.endswith('/command')):
+            if msg.topic == EW11_TOPIC + '/recv':
+                last_received_time = time.monotonic()
+            if msg.retain and msg.topic.endswith('/command'):
+                log('[WARNING] retained control command ignored')
+                return
+            try:
+                MSG_QUEUE.put_nowait(msg)
+            except Full:
+                # Loss of a byte-stream fragment invalidates RESIDUE. Recover the
+                # whole session, rather than interpreting an incomplete stream.
+                if not restart_flag:
+                    log('[ERROR] receive queue overflow; restarting session')
+                restart_flag = True
  
 
     # MQTT 통신 연결 해제 Callback
-    def on_disconnect(client, userdata, rc):
+    def on_disconnect(client, userdata, disconnect_flags, rc, properties):
         nonlocal mqtt_connected
         nonlocal mqtt_disconnected_time
 
@@ -382,26 +449,21 @@ def ezville_loop(config):
 
     # MQTT message를 분류하여 처리
     async def process_message():
-        # MSG_QUEUE의 message를 하나씩 pop
-        nonlocal MSG_QUEUE
-        nonlocal last_received_time
-        
-        stop = False
-        while not stop:
-            if MSG_QUEUE.empty():
-                stop = True
-            else:
-                msg = MSG_QUEUE.get()
-                topics = msg.topic.split('/')
-
-                if topics[0] == HA_TOPIC and topics[-1] == 'command':
+        # A busy producer must not monopolize the event loop forever.
+        for _ in range(100):
+            try:
+                msg = MSG_QUEUE.get_nowait()
+            except Empty:
+                break
+            topics = msg.topic.split('/')
+            if topics[0] == HA_TOPIC and topics[-1] == 'command':
+                try:
                     await HA_process(topics, msg.payload.decode('utf-8'))
-                elif topics[0] == EW11_TOPIC and topics[-1] == 'recv':
-                    # Que에서 확인된 시간 기준으로 EW11 Health Check함.
-                    last_received_time = time.time()
-
-                    await EW11_process(msg.payload.hex().upper())
-                   
+                except (ValueError, IndexError, UnicodeError) as error:
+                    log('[WARNING] invalid command rejected: {}'.format(type(error).__name__))
+            elif msg.topic == EW11_TOPIC + '/recv':
+                await EW11_process(msg.payload.hex().upper())
+            await asyncio.sleep(0)
     
     # EW11 전달된 메시지 처리
     async def EW11_process(raw_data):
@@ -409,10 +471,10 @@ def ezville_loop(config):
         nonlocal RESIDUE
         nonlocal MSG_CACHE
         nonlocal DEVICE_STATE
-        nonlocal last_state_update_time
+        nonlocal last_valid_packet_time
         
         raw_data = RESIDUE + raw_data
-        last_state_update_time = time.time()
+        RESIDUE = ''
         
         if ew11_log:
             log('[SIGNAL] receved: {}'.format(raw_data))
@@ -443,6 +505,7 @@ def ezville_loop(config):
                     k+=1
                     continue
                 else:
+                    last_valid_packet_time = time.monotonic()
                     STATE_PACKET = False
                     ACK_PACKET = False
                     
@@ -469,6 +532,10 @@ def ezville_loop(config):
                         # MSG_CACHE에 없는 새로운 패킷이거나 FORCE_UPDATE 실행된 경우만 실행
                         if MSG_CACHE.get(packet[0:10]) != packet[10:] or FORCE_UPDATE:
                             name = STATE_HEADER[packet[2:4]][0]                            
+                            if not valid_state_packet(name, packet):
+                                k += packet_length
+                                RESIDUE = ''
+                                continue
                             if name == 'light':
                                 # ROOM ID
                                 rid = int(packet[5], 16)
@@ -521,6 +588,7 @@ def ezville_loop(config):
                                         await mqtt_discovery(payload)
                                         await asyncio.sleep(DISCOVERY_DELAY)
                                     
+                                    onoff = 'off'
                                     setT = str(int(packet[16 + 4 * rid:18 + 4 * rid], 16))
                                     curT = str(int(packet[18 + 4 * rid:20 + 4 * rid], 16))
                                     
@@ -575,7 +643,7 @@ def ezville_loop(config):
                                         power_num = '{:.2f}'.format(int(packet[8 + 6 * id: 12 + 6 * id], 16) / 100)
                                         
                                         await update_state(name, 'power', rid, id, onoff)
-                                        await update_state(name, 'auto', rid, id, onoff)
+                                        await update_state(name, 'auto', rid, id, autoonoff)
                                         await update_state(name, 'current', rid, id, power_num)
                                     
                                         # 직전 처리 State 패킷은 저장
@@ -679,21 +747,22 @@ def ezville_loop(config):
         # Discovery에 등록
         topic = 'homeassistant/{}/ezville_wallpad/{}/config'.format(intg, payload['name'])
         log('[INFO] 장치 등록:  {}'.format(topic))
-        mqtt_client.publish(topic, json.dumps(payload))
+        publish_checked(topic, json.dumps(payload))
 
     
     # 장치 State를 MQTT로 Publish
     async def update_state(device, state, id1, id2, value):
         nonlocal DEVICE_STATE
+        nonlocal last_state_update_time
 
         deviceID = '{}_{:0>2d}_{:0>2d}'.format(device, id1, id2)
         key = deviceID + state
         
         if value != DEVICE_STATE.get(key) or FORCE_UPDATE:
-            DEVICE_STATE[key] = value
-            
             topic = STATE_TOPIC.format(deviceID, state)
-            mqtt_client.publish(topic, value.encode())
+            publish_checked(topic, value.encode())
+            DEVICE_STATE[key] = value
+            last_state_update_time = time.monotonic()
                     
             if mqtt_log:
                 log('[LOG] ->> HA : {} >> {}'.format(topic, value))
@@ -706,9 +775,10 @@ def ezville_loop(config):
         nonlocal CMD_QUEUE
         nonlocal last_command_time
 
+        validate_command(topics, value)
         device_info = topics[1].split('_')
         device = device_info[0]
-        last_command_time = time.time()
+        last_command_time = time.monotonic()
         
         if mqtt_log:
             log('[LOG] HA ->> : {} -> {}'.format('/'.join(topics), value))
@@ -731,7 +801,7 @@ def ezville_loop(config):
                             recvcmd = 'F7' + RS485_DEVICE[device]['power']['id'] + '1' + str(idx) + RS485_DEVICE[device]['power']['ack']
                             statcmd = [key, value]
                            
-                            await CMD_QUEUE.put({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
+                            CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
                         
                         # Thermostat는 외출 모드를 Off 모드로 연결
                         elif value == 'off':
@@ -740,7 +810,7 @@ def ezville_loop(config):
                             recvcmd = 'F7' + RS485_DEVICE[device]['away']['id'] + '1' + str(idx) + RS485_DEVICE[device]['away']['ack']
                             statcmd = [key, value]
                            
-                            await CMD_QUEUE.put({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
+                            CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
                         
 #                        elif value == 'off':
 #                        
@@ -748,7 +818,7 @@ def ezville_loop(config):
 #                            recvcmd = 'F7' + RS485_DEVICE[device]['power']['id'] + '1' + str(idx) + RS485_DEVICE[device]['power']['ack']
 #                            statcmd = [key, value]
 #                           
-#                            await CMD_QUEUE.put({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})                    
+#                            CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
                                                
                         if debug:
                             log('[DEBUG] Queued ::: sendcmd: {}, recvcmd: {}, statcmd: {}'.format(sendcmd, recvcmd, statcmd))
@@ -760,7 +830,7 @@ def ezville_loop(config):
                         recvcmd = 'F7' + RS485_DEVICE[device]['target']['id'] + '1' + str(idx) + RS485_DEVICE[device]['target']['ack']
                         statcmd = [key, str(value)]
 
-                        await CMD_QUEUE.put({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
+                        CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
                                
                         if debug:
                             log('[DEBUG] Queued ::: sendcmd: {}, recvcmd: {}, statcmd: {}'.format(sendcmd, recvcmd, statcmd))
@@ -790,7 +860,7 @@ def ezville_loop(config):
                     recvcmd = 'F7' + RS485_DEVICE[device]['power']['id'] + '1' + str(idx) + RS485_DEVICE[device]['power']['ack']
                     statcmd = [key, value]
                     
-                    await CMD_QUEUE.put({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
+                    CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
                                
                     if debug:
                         log('[DEBUG] Queued ::: sendcmd: {}, recvcmd: {}, statcmd: {}'.format(sendcmd, recvcmd, statcmd))
@@ -802,7 +872,7 @@ def ezville_loop(config):
                     recvcmd = 'F7' + RS485_DEVICE[device]['power']['id'] + '1' + str(idx) + RS485_DEVICE[device]['power']['ack']
                     statcmd = [key, value]
                         
-                    await CMD_QUEUE.put({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
+                    CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
                                
                     if debug:
                         log('[DEBUG] Queued ::: sendcmd: {}, recvcmd: {}, statcmd: {}'.format(sendcmd, recvcmd, statcmd))
@@ -814,7 +884,7 @@ def ezville_loop(config):
                         recvcmd = ['F7' + RS485_DEVICE[device]['power']['id'] + '1' + str(idx) + RS485_DEVICE[device]['power']['ack']]
                         statcmd = [key, value]
 
-                        await CMD_QUEUE.put({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
+                        CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
                                
                         if debug:
                             log('[DEBUG] Queued ::: sendcmd: {}, recvcmd: {}, statcmd: {}'.format(sendcmd, recvcmd, statcmd))
@@ -847,7 +917,7 @@ def ezville_loop(config):
                     recvcmd = 'NULL'
                     statcmd = [key, 'NULL']
                     
-                    await CMD_QUEUE.put({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
+                    CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
                     
                     if debug:
                         log('[DEBUG] Queued ::: sendcmd: {}, recvcmd: {}, statcmd: {}'.format(sendcmd, recvcmd, statcmd))
@@ -861,17 +931,14 @@ def ezville_loop(config):
                 log('[SIGNAL] 신호 전송: {}'.format(send_data))
                         
             if comm_mode == 'mqtt':
-                mqtt_client.publish(EW11_SEND_TOPIC, bytes.fromhex(send_data['sendcmd']))
+                publish_checked(EW11_SEND_TOPIC, bytes.fromhex(send_data['sendcmd']))
             else:
-                nonlocal soc
-                try:
-                    soc.sendall(bytes.fromhex(send_data['sendcmd']))
-                except OSError:
-                    soc.close()
-                    soc = initiate_socket()
-                    soc.sendall(bytes.fromhex(send_data['sendcmd']))
+                await asyncio.wait_for(
+                    session_loop.sock_sendall(soc, bytes.fromhex(send_data['sendcmd'])),
+                    timeout=10,
+                )
             if debug:                     
-                log('[DEBUG] Iter. No.: ' + str(i + 1) + ', Target: ' + send_data['statcmd'][1] + ', Current: ' + DEVICE_STATE.get(send_data['statcmd'][0]))
+                log('[DEBUG] Iter. No.: {}, Target: {}, Current: {}'.format(i + 1, send_data['statcmd'][1], DEVICE_STATE.get(send_data['statcmd'][0])))
              
             # Ack나 State 업데이트가 불가한 경우 한번만 명령 전송 후 Return
             if send_data['statcmd'][1] == 'NULL':
@@ -890,9 +957,7 @@ def ezville_loop(config):
             if send_data['statcmd'][1] == DEVICE_STATE.get(send_data['statcmd'][0]):
                 return
 
-        if ew11_log:
-            log('[SIGNAL] {}회 명령을 재전송하였으나 수행에 실패했습니다.. 다음의 Queue 삭제: {}'.format(str(CMD_RETRY_COUNT),send_data))
-            return
+        log('[WARNING] command failed after {} attempts: {}'.format(CMD_RETRY_COUNT, send_data['statcmd']))
         
                                                 
     # EW11 동작 상태를 체크해서 필요시 리셋 실시 및 HA에 상태 알림
@@ -902,7 +967,7 @@ def ezville_loop(config):
         ew11_status = 'online'  # EW11 상태 추적: 'online' 또는 'offline'
         
         while True:
-            timestamp = time.time()
+            timestamp = time.monotonic()
             time_since_last_packet = timestamp - last_received_time
         
             # TIMEOUT 시간 동안 새로 받은 EW11 패킷이 없으면 상태를 'offline'으로 변경 및 HA에 알림
@@ -914,7 +979,7 @@ def ezville_loop(config):
                     
                     # HA에 EW11 상태 알림 (MQTT publish)
                     try:
-                        payload = {'status': 'offline', 'timestamp': int(time.time()), 'last_packet_time': int(last_received_time)}
+                        payload = {'status': 'offline', 'timestamp': int(time.time()), 'last_packet_time': int(time.time() - time_since_last_packet), 'last_packet_age': time_since_last_packet}
                         mqtt_client.publish(HA_TOPIC + '/ew11/status', json.dumps(payload))
                         log('[ALERT] EW11 offline 상태를 HA에 전송')
                         if mqtt_log:
@@ -957,25 +1022,19 @@ def ezville_loop(config):
                                                 
     # Telnet 접속하여 EW11 리셋        
     async def reset_EW11(): 
-        ew11_id = config['ew11_id']
-        ew11_password = config['ew11_password']
-        ew11_server = config['ew11_server']
-
-        # timeout 없는 Telnet 호출은 EW11 장애 시 복구 루프도 영구 정지시킨다.
-        ew11 = telnetlib.Telnet(ew11_server, timeout=10)
-        try:
-            ew11.read_until(b'login:', timeout=5)
-            ew11.write(ew11_id.encode('utf-8') + b'\n')
-            ew11.read_until(b'password:', timeout=5)
-            ew11.write(ew11_password.encode('utf-8') + b'\n')
-            ew11.write(b'Restart\n')
-            ew11.read_until(b'Restart..', timeout=5)
-        finally:
-            ew11.close()
-        
+        def reset():
+            with telnetlib.Telnet(config['ew11_server'], timeout=10) as ew11:
+                def expect(prompt):
+                    if not ew11.read_until(prompt, timeout=5).endswith(prompt):
+                        raise TimeoutError('EW11 Telnet prompt timeout')
+                expect(b'login:')
+                ew11.write(config['ew11_id'].encode('utf-8') + b'\n')
+                expect(b'password:')
+                ew11.write(config['ew11_password'].encode('utf-8') + b'\n')
+                ew11.write(b'Restart\n')
+                expect(b'Restart..')
+        await bounded_call(reset, 30)
         log('[INFO] EW11 리셋 완료')
-        
-        # 리셋 후 60초간 Delay
         await asyncio.sleep(60)
         
     # Addon 먹통 상태 감지 및 자동 리셋
@@ -983,18 +1042,14 @@ def ezville_loop(config):
         nonlocal restart_flag
         
         while True:
-            timestamp = time.time()
+            timestamp = time.monotonic()
             
-            # 마지막 명령 또는 상태 업데이트 시간 확인
-            time_since_command = timestamp - last_command_time
-            time_since_state = timestamp - last_state_update_time
-            
-            # 명령과 상태 업데이트 중 더 최근의 시간 기준으로 판단
-            last_activity_time = max(last_command_time, last_state_update_time)
-            time_since_activity = timestamp - last_activity_time
+            # Incoming commands or corrupt bytes cannot prove that EW11 is healthy.
+            # Unchanged but valid packets still prove that the bus is alive.
+            time_since_activity = timestamp - last_valid_packet_time
             
             if time_since_activity > HEALTH_CHECK_TIMEOUT:
-                log('[WARNING] Addon 먹통 감지: {}초 동안 활동 없음. 자동 리셋 트리거'.format(int(time_since_activity)))
+                log('[WARNING] Addon 먹통 감지: {}초 동안 유효 패킷 없음. 자동 리셋 트리거'.format(int(time_since_activity)))
                 log('[DEBUG] Last command time: {}, Last state update time: {}'.format(last_command_time, last_state_update_time))
                 restart_flag = True
                 await asyncio.sleep(0)
@@ -1020,13 +1075,14 @@ def ezville_loop(config):
     async def diagnostic_heartbeat_loop():
         """먹통 전후 상태를 사후 비교할 수 있도록 주기적 스냅샷을 남긴다."""
         while True:
-            now = time.time()
+            now = time.monotonic()
             log('[HEALTH] mqtt_connected={} mqtt_message_age={:.1f}s '
-                'ew11_packet_age={:.1f}s state_age={:.1f}s command_age={:.1f}s '
+                'ew11_packet_age={:.1f}s valid_packet_age={:.1f}s state_publish_age={:.1f}s command_age={:.1f}s '
                 'msg_queue={} cmd_queue={} restart_flag={} restart_count={}'.format(
                     mqtt_connected,
                     now - last_mqtt_message_time,
                     now - last_received_time,
+                    now - last_valid_packet_time,
                     now - last_state_update_time,
                     now - last_command_time,
                     MSG_QUEUE.qsize(),
@@ -1035,57 +1091,28 @@ def ezville_loop(config):
                     restart_count))
             await asyncio.sleep(diagnostic_interval)
     
-    def initiate_socket():
-        # SOCKET 통신 시작
+    async def initiate_socket():
         log('[INFO] Socket 연결을 시작합니다')
-            
-        retry_count = 0
-        while True:
-            try:
-                soc = socket.socket()
-                soc.settimeout(10)
-                soc.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                connect_socket(soc)
-                soc.settimeout(None)
-                return soc
-            except OSError as e:
-                soc.close()
-                retry_count += 1
-                log('[ERROR] Socket 연결 실패: {} ({}회 재시도)'.format(e, retry_count))
-                if retry_count >= 3:
-                    raise
-                time.sleep(1)
-             
-            
-    def connect_socket(socket):
-        socket.connect((SOC_ADDRESS, SOC_PORT))
-    
+        connection = socket.socket()
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        connection.setblocking(False)
+        try:
+            await asyncio.wait_for(session_loop.sock_connect(connection, (SOC_ADDRESS, SOC_PORT)), 10)
+            return connection
+        except BaseException:
+            connection.close()
+            raise
 
     async def serial_recv_loop():
-        nonlocal soc
-        nonlocal MSG_QUEUE
-        
-        class MSG:
-            topic = ''
-            payload = bytearray()
-        
-        msg = MSG()
-        
+        nonlocal last_received_time
         while True:
-            try:
-                # EW11 버퍼 크기만큼 데이터 받기
-                DATA = soc.recv(EW11_BUFFER_SIZE)
-                msg.topic = EW11_TOPIC + '/recv'
-                msg.payload = DATA   
-                
-                MSG_QUEUE.put(msg)
-                
-            except OSError:
-                soc.close()
-                soc = initiate_socket()
-         
+            data = await asyncio.wait_for(session_loop.sock_recv(soc, EW11_BUFFER_SIZE), EW11_TIMEOUT)
+            if not data:
+                raise ConnectionError('EW11 socket EOF')
+            last_received_time = time.monotonic()
+            # A new object is essential: queued messages must never share payload.
+            MSG_QUEUE.put_nowait(SimpleNamespace(topic=EW11_TOPIC + '/recv', payload=data))
             await asyncio.sleep(SERIAL_RECV_DELAY) 
-        
         
     async def state_update_loop():
         nonlocal force_target_time
@@ -1095,7 +1122,7 @@ def ezville_loop(config):
         while True:
             await process_message()                    
             
-            timestamp = time.time()
+            timestamp = time.monotonic()
             
             # 정해진 시간이 지나면 FORCE 모드 발동
             if timestamp > force_target_time and not FORCE_UPDATE and FORCE_MODE:
@@ -1125,140 +1152,126 @@ def ezville_loop(config):
             await asyncio.sleep(COMMAND_LOOP_DELAY)    
  
 
-    # EW11 재실행 시 리스타트 실시
+    def publish_checked(topic, payload):
+        result = mqtt_client.publish(topic, payload)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise ConnectionError('MQTT publish rejected rc={}'.format(result.rc))
+
     async def restart_control():
-        nonlocal mqtt_client
-        nonlocal restart_flag
-        nonlocal MQTT_ONLINE
-        nonlocal restart_count
-        
-        while True:
-            if restart_flag or (not MQTT_ONLINE and ADDON_STARTED and REBOOT_CONTROL):
-                if restart_flag:
-                    log('[WARNING] EW11 재시작 확인')
-                elif not MQTT_ONLINE and ADDON_STARTED and REBOOT_CONTROL:
-                    log('[WARNING] 동작 중 MQTT Integration Offline 변경')
-                
-                # Asyncio Loop 획득
-                loop = asyncio.get_event_loop()
-                
-                # MTTQ 및 socket 연결 종료
-                log('[WARNING] 모든 통신 종료')
-                mqtt_client.loop_stop()
-                if comm_mode == 'mixed' or comm_mode == 'socket':
-                    nonlocal soc
-                    soc.close()
-                       
-                # flag 원복
-                restart_count += 1
-                restart_flag = False
-                MQTT_ONLINE = False
-
-                # asyncio loop 종료
-                log('[WARNING] asyncio loop 종료')
-                loop.stop()
-            
-            # RESTART_CHECK_DELAY초 마다 실행
+        while not restart_flag and not (REBOOT_CONTROL and ADDON_STARTED and not MQTT_ONLINE):
             await asyncio.sleep(RESTART_CHECK_DELAY)
-
+        log('[WARNING] communication session recovery requested')
         
-    # MQTT 통신
-    # mqtt_client = mqtt.Client('mqtt-ezville')
-    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, 'mqtt-ezville')
-    mqtt_client.username_pw_set(config['mqtt_id'], config['mqtt_password'])
-    mqtt_client.on_connect = on_connect
-    mqtt_client.on_disconnect = on_disconnect
-    mqtt_client.on_message = on_message
-    mqtt_client.on_log = on_mqtt_log
-    mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
-    mqtt_client.connect_async(config['mqtt_server'])
-    
-    # asyncio loop 획득 및 EW11 오류시 재시작 task 등록
-    loop = asyncio.get_event_loop()
+    async def session():
+        nonlocal soc, ADDON_STARTED
+        if REBOOT_CONTROL:
+            # Async wait: shutdown and process heartbeat stay responsive.
+            deadline = time.monotonic() + MQTT_RECONNECT_TIMEOUT
+            while not MQTT_ONLINE:
+                if time.monotonic() > deadline:
+                    raise TimeoutError('HA MQTT birth message timeout')
+                await asyncio.sleep(0.2)
+        if comm_mode in ('socket', 'mixed'):
+            soc = await initiate_socket()
+        await asyncio.sleep(startup_delay)
+        ADDON_STARTED = True
+        log('[INFO] 장치 등록 및 상태 업데이트를 시작합니다')
+        tasklist = [asyncio.create_task(coro) for coro in (
+            state_update_loop(), command_loop(), ew11_health_loop(),
+            addon_health_loop(), mqtt_health_loop(), diagnostic_heartbeat_loop(),
+        )]
+        if comm_mode == 'socket':
+            tasklist.append(asyncio.create_task(serial_recv_loop()))
+        recovery = asyncio.create_task(restart_control())
+        try:
+            done, _ = await asyncio.wait(tasklist + [recovery], return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task is not recovery:
+                    task.result()  # Full traceback is logged by the session owner.
+                    raise RuntimeError('communication task unexpectedly returned')
+        finally:
+            await cancel_tasks(tasklist + [recovery])
 
+    previous_exception_handler = session_loop.get_exception_handler()
     def asyncio_exception_handler(loop, context):
+        nonlocal restart_flag
         error = context.get('exception')
         detail = ''.join(traceback.format_exception(type(error), error, error.__traceback__)) if error else context.get('message')
-        log('[ERROR] asyncio 미처리 예외: {}'.format(detail))
-
-    loop.set_exception_handler(asyncio_exception_handler)
-    loop.create_task(restart_control())
-        
-    # Discovery 및 강제 업데이트 시간 설정
-    force_target_time = time.time() + FORCE_PERIOD
-    force_stop_time = force_target_time + FORCE_DURATION
-    
-
-    while True:
-        # MQTT 통신 시작
-        mqtt_client.loop_start()
-        # MQTT Integration의 Birth/Last Will Testament를 기다림 (1초 단위)
-        while not MQTT_ONLINE and REBOOT_CONTROL:
-            log('[INFO] Waiting for MQTT connection')
-            time.sleep(1)
-        
-        # socket 통신 시작       
-        if comm_mode == 'mixed' or comm_mode == 'socket':
-            soc = initiate_socket()  
-
-        log('[INFO] 장치 등록 및 상태 업데이트를 시작합니다')
-
-        tasklist = []
- 
-        # 필요시 Discovery 등의 지연을 위해 Delay 부여 
-        time.sleep(startup_delay)      
-  
-        # socket 데이터 수신 loop 실행
-        if comm_mode == 'socket':
-            tasklist.append(loop.create_task(serial_recv_loop()))
-        # EW11 패킷 기반 state 업데이트 loop 실행
-        tasklist.append(loop.create_task(state_update_loop()))
-        # Home Assistant 명령 실행 loop 실행
-        tasklist.append(loop.create_task(command_loop()))
-        # EW11 상태 체크 loop 실행
-        tasklist.append(loop.create_task(ew11_health_loop()))
-        # Addon 먹통 상태 감지 및 자동 리셋 loop 실행
-        tasklist.append(loop.create_task(addon_health_loop()))
-        # MQTT 자동 재접속 자체가 멈춘 경우 감지
-        tasklist.append(loop.create_task(mqtt_health_loop()))
-        # 장기 장애 분석용 상태 스냅샷 기록
-        tasklist.append(loop.create_task(diagnostic_heartbeat_loop()))
-
-        # create_task의 예외는 await하지 않으면 통신 task만 조용히 죽을 수
-        # 있다. 즉시 기록하고 기존 restart_control을 통해 전체를 재생성한다.
-        def task_done(task):
-            nonlocal restart_flag
-            if task.cancelled():
-                return
-            error = task.exception()
-            if error is not None:
-                detail = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
-                log('[ERROR] 백그라운드 Task 비정상 종료:\n{}'.format(detail))
-                restart_flag = True
-
-        for task in tasklist:
-            task.add_done_callback(task_done)
-        
-        # ADDON 정상 시작 Flag 설정
-        ADDON_STARTED = True
-        loop.run_forever()
-        
-        # 이전 task는 취소
-        log('[INFO] 이전 실행 Task 종료')
-        for task in tasklist:
-            task.cancel()
-
-        ADDON_STARTED = False
-        
-        # 주요 변수 초기화    
-        MSG_QUEUE = Queue()
-        CMD_QUEUE = asyncio.Queue()
-        DEVICE_STATE = {}
-        MSG_CACHE = {}
-        DISCOVERY_LIST = []
-        RESIDUE = ''
-        last_command_time = time.time()
-        last_state_update_time = time.time()
+        log('[ERROR] asyncio unhandled failure: {}'.format(detail))
+        restart_flag = True
+    session_loop.set_exception_handler(asyncio_exception_handler)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        session_loop.add_signal_handler(sig, shutdown.set)
+    heartbeat = asyncio.create_task(heartbeat_loop())
+    stop_task = asyncio.create_task(shutdown.wait())
+    delay = 1
+    try:
+        while not shutdown.is_set():
+            restart_flag = False
+            MQTT_ONLINE = False
+            ADDON_STARTED = False
+            mqtt_connected = False
+            mqtt_disconnected_time = time.monotonic()
+            last_command_time = last_state_update_time = last_valid_packet_time = time.monotonic()
+            MSG_QUEUE = Queue(maxsize=1000)
+            CMD_QUEUE = asyncio.Queue(maxsize=100)
+            DEVICE_STATE, MSG_CACHE, DISCOVERY_LIST, RESIDUE = {}, {}, [], ''
+            force_target_time = time.monotonic() + FORCE_PERIOD
+            force_stop_time = force_target_time + FORCE_DURATION
+            FORCE_UPDATE = False
+            startup_delay = 0
+            # A fresh client includes a fresh socket, reconnect state and network thread.
+            mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='mqtt-ezville')
+            mqtt_client.username_pw_set(config['mqtt_id'], config['mqtt_password'])
+            mqtt_client.on_connect = on_connect
+            mqtt_client.on_disconnect = on_disconnect
+            mqtt_client.on_message = on_message
+            mqtt_client.on_log = on_mqtt_log
+            mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
+            started = time.monotonic()
+            active = None
+            try:
+                mqtt_client.connect_async(config['mqtt_server'], port=config.get('mqtt_port', 1883))
+                mqtt_client.loop_start()
+                active = asyncio.create_task(session())
+                done, _ = await asyncio.wait([active, stop_task, heartbeat], return_when=asyncio.FIRST_COMPLETED)
+                if heartbeat in done:
+                    heartbeat.result()
+                    raise RuntimeError('process heartbeat stopped')
+                if active in done:
+                    active.result()
+            except Exception:
+                log('[ERROR] communication session failed:\n{}'.format(traceback.format_exc()))
+            finally:
+                if active is not None:
+                    await cancel_tasks([active])
+                ADDON_STARTED = False
+                if soc is not None:
+                    soc.close()
+                    soc = None
+                client = mqtt_client
+                def close_mqtt():
+                    client.disconnect()
+                    client.loop_stop()
+                # Cleanup failure escapes this loop. Parent restarts the worker.
+                await bounded_call(close_mqtt, 10)
+            if shutdown.is_set():
+                break
+            restart_count += 1
+            if time.monotonic() - started >= 300:
+                delay = 1
+            log('[WARNING] session restart count={}, retry in {}s'.format(restart_count, delay))
+            try:
+                await asyncio.wait_for(shutdown.wait(), delay)
+            except asyncio.TimeoutError:
+                pass
+            delay = min(delay * 2, 60)
+    finally:
+        await cancel_tasks([heartbeat, stop_task])
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            session_loop.remove_signal_handler(sig)
+        session_loop.set_exception_handler(previous_exception_handler)
+        log('[INFO] communication worker stopped')
 
 
 if __name__ == '__main__':
@@ -1266,6 +1279,17 @@ if __name__ == '__main__':
         CONFIG = json.load(file)
 
     init_diagnostic_logging(CONFIG)
+    # SIGUSR1 is sent by the independent parent before terminating a stalled worker.
+    stack_path = CONFIG.get('diagnostic_log_file', '/share/simple_mqtt_ezville_control.log') + '.stacks.log'
+    try:
+        if os.path.exists(stack_path) and os.path.getsize(stack_path) > 5 * 1024 * 1024:
+            os.replace(stack_path, stack_path + '.1')
+        stack_file = open(stack_path, 'a')
+        stack_file.write('\nWorker pid={} started {}\n'.format(os.getpid(), time.strftime('%Y-%m-%d %H:%M:%S')))
+        stack_file.flush()
+    except OSError:
+        stack_file = sys.stderr
+    faulthandler.register(signal.SIGUSR1, file=stack_file, all_threads=True)
 
     def thread_exception_handler(args):
         detail = ''.join(traceback.format_exception(
@@ -1285,7 +1309,7 @@ if __name__ == '__main__':
         )
     }, ensure_ascii=False, sort_keys=True)))
     try:
-        ezville_loop(CONFIG)
+        asyncio.run(ezville_loop(CONFIG))
     except BaseException:
         log('[FATAL] addon process 비정상 종료:\n{}'.format(traceback.format_exc()))
         raise

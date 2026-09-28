@@ -1,0 +1,26 @@
+name: EzVille resilience tests
+on:
+  pull_request:
+    paths:
+      - 'simple_mqtt_ezville_control/**'
+      - '.github/workflows/ezville-resilience.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'simple_mqtt_ezville_control/**'
+      - '.github/workflows/ezville-resilience.yml'
+permissions:
+  contents: read
+jobs:
+  container-tests:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build actual add-on image
+        run: docker build -t ezville-test simple_mqtt_ezville_control
+      - name: Run failure and real MQTT wire tests in the image
+        run: >-
+          docker run --rm --entrypoint python
+          -v "$PWD/simple_mqtt_ezville_control:/tests:ro"
+          ezville-test -m unittest discover -s /tests/tests -v
