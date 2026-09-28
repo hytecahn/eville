@@ -441,10 +441,18 @@ async def ezville_loop(config):
         log('[WARNING] MQTT 연결 해제 (rc={})'.format(rc))
 
     def on_mqtt_log(client, userdata, level, buf):
-        # Paho 내부 경고/오류만 보존한다. 정상 패킷 debug는 장기 로그를
-        # 과도하게 키우므로 MQTT_LOG를 켠 경우에만 기록한다.
-        if level in (mqtt.MQTT_LOG_WARNING, mqtt.MQTT_LOG_ERR) or mqtt_log:
+        # WARNING/ERROR는 항상 보존한다. MQTT_LOG를 켜도 EW11의 고빈도
+        # PUBLISH wire trace는 제외하여 정상 운용 중 로그 폭증을 막는다.
+        if level in (mqtt.MQTT_LOG_WARNING, mqtt.MQTT_LOG_ERR):
             log('[MQTT] level={} {}'.format(level, buf))
+            return
+        if not mqtt_log:
+            return
+        # Paho는 수신/송신 PUBLISH마다 DEBUG 로그를 발생시킨다. EW11/recv는
+        # 초당 여러 번 들어올 수 있으므로 payload wire trace는 별도 EW11_LOG로 본다.
+        if buf.startswith('Received PUBLISH') or buf.startswith('Sending PUBLISH'):
+            return
+        log('[MQTT] level={} {}'.format(level, buf))
 
 
     # MQTT message를 분류하여 처리
