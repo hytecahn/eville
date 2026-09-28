@@ -6,7 +6,8 @@
   - 대기전력소모, 현관 스위치 상태 (외출 모드, 그룹 조명) 센서 지원
   - MQTT 기반 장치 자동 Discovery 지원
   - **엘리베이터 도착 알림**: MQTT 토픽 `ezville/elevator/arrival`으로 도착 패킷 발행
-  - **Addon 먹통 감지 및 자동 리셋**: 5분 이상 응답이 없으면 자동으로 복구
+  - **Addon 먹통 감지 및 자동 리셋**: 5분 이상 응답이 없거나 MQTT 재연결이 2분 이상 실패하면 자동으로 복구
+  - **영구 진단 로그**: `/share/simple_mqtt_ezville_control.log`에 장애, traceback 및 10분 주기 상태를 90일간 보관
 
 ## 2. 설치 방법
 
@@ -58,6 +59,20 @@
   - force_update_duration (초): 강제 상태 업데이트 실행 기간 (기본값 2초)
   - ew11_buffer_size (bytes): serial mode에서 데이터를 읽어오는 buffer size (기본값 128)
   - ew11_timeout (초): EW11이 설정 시간 이상 데이터를 읽어오지 않으면 강제 리셋 실시 (기본값 1시간)
+  - diagnostic_log_file: HA 재시작 후에도 보존되는 진단 로그 파일 (기본값 `/share/simple_mqtt_ezville_control.log`)
+  - diagnostic_log_days: 일 단위 진단 로그 보관 기간 (기본값 90일)
+  - diagnostic_interval (초): MQTT/EW11/Queue 상태 스냅샷 기록 주기 (기본값 600초)
+
+### 3.3. 장애 분석 로그 수집
+
+통신 장애가 발생하면 애드온을 재시작해도 `/share`의 로그는 삭제되지 않습니다. File editor, Samba 또는 SSH로 아래 파일을 내려받아 전달해 주세요.
+
+```text
+/share/simple_mqtt_ezville_control.log
+/share/simple_mqtt_ezville_control.log.YYYY-MM-DD
+```
+
+장애가 발생한 날짜의 회전 로그와 현재 로그를 함께 전달하면 MQTT 연결 해제 코드, 자동 복구 횟수, 마지막 EW11 패킷 시각, Queue 적체 및 전체 traceback을 확인할 수 있습니다. 로그에는 MQTT/EW11 비밀번호를 기록하지 않습니다.
 
 ## 4. 추가 기능 설명
 
