@@ -1,6 +1,6 @@
 {
   "name": "MQTT 기반 Simple EzVille Wallpad Control",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "slug": "simple_mqtt_ezville_control",
   "url": "https://github.com/hytecahn/eville",
   "description": "MQTT 통신을 활용한 간단화된 EzVille 월패드 컨트롤러",
@@ -36,7 +36,7 @@
     "state_loop_delay": 0.2,
     "command_loop_delay": 0.2,
     "serial_recv_delay": 0.03,
-    "restart_check_delay": 2.0,
+    "restart_check_delay": 2,
     "force_update_mode": true,
     "force_update_period": 600,
     "force_update_duration": 2,

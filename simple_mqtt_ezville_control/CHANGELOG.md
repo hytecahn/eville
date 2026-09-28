@@ -1,5 +1,11 @@
 수정 사항 Changelog
 
+## 0.0.13
+
+- `MQTT_LOG`를 켠 경우에도 Paho의 고빈도 `Received PUBLISH`/`Sending PUBLISH` wire trace는 기록하지 않아 EW11 정상 트래픽으로 로그가 폭증하지 않도록 했습니다.
+- MQTT WARNING/ERROR는 `MQTT_LOG` 설정과 관계없이 계속 기록하며, 연결·구독·PING 등 저빈도 MQTT 진단 로그는 `MQTT_LOG` 사용 시 유지합니다.
+- 원시 EW11 패킷이 필요한 경우 기존 `EW11_LOG`를 사용합니다.
+
 ## 0.0.12
 
 - 별도 감시 프로세스가 이벤트 루프의 heartbeat를 감시합니다. 정지 감지 시 스택을 기록하고 통신 프로세스를 재생성합니다. 기본 감지 시간은 120초입니다.
