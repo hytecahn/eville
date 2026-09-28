@@ -1,6 +1,6 @@
 {
   "name": "ws Add-ons",
-  "url": "https://github.com/hyecahn/eville",
+  "url": "https://github.com/hytecahn/eville",
   "maintainer": "ws <hytecahn@gmail.com>",
   "addons": [
     "ezville_wallpad",
