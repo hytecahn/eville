@@ -5,12 +5,12 @@ ENV TZ=Asia/Seoul
 
 # Install requirements for add-on
 RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir paho-mqtt
+RUN pip install --no-cache-dir paho-mqtt==2.1.0
 #RUN pip install --no-cache-dir telnetlib
 
 # Copy data for add-on
 COPY run.sh /
-COPY ezville.py /
+COPY ezville.py runtime.py watchdog.py /
 
 WORKDIR /share
 
