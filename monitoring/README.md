@@ -152,6 +152,13 @@ receive bounded redacted excerpts or reports temporarily for analysis.
 - `/v1/health`: collector freshness, stored batch/log-line counts and latest observed versions.
 - `/v1/report`: seven-day bounded report, at most 30 redacted error examples.
 - `/v1/recent`: at most 30 recent redacted log lines, scans at most the last 100 batches.
+- `/v1/daily` (0.5.0): active daily configuration, enabled-since time, latest delivery
+  status and the preceding 22:00 KST report. Before delivery, returns an explicitly
+  identified preview. A saved report preserves that day's new-pattern classification.
+  Includes counts, new/unknown signatures, first/last times and marker before/after
+  candidate counts. Raw frames and call IDs remain local; samples become SHA-256
+  fingerprints and byte lengths. Returns at most 128 prioritized patterns, the last
+  20 markers and 30 calls, with original totals and a truncation flag.
 - All data requests require POST with HMAC-SHA256 over method/path/time/nonce/body.
   Clock tolerance is 60 seconds. Nonces are rejected on reuse while this API process runs;
   a server restart resets the nonce cache. Replayed reads cannot perform writes.
@@ -217,3 +224,26 @@ Use this secret store for the unattended runner; do not place the key in workflo
 automation prompts. GitHub schedule timing is approximate. Configure your GitHub workflow
 failure notification preference if alerts are wanted. This is an external collection
 freshness check, not proof of device success or an AI code-repair executor.
+
+## External daily AI review and owner approval
+
+The requested external review is separate from `daily_enabled` and the optional
+weekly OpenAI API worker. HA collects continuously and delivers its local daily
+report after 22:01:30 KST; the external reviewer reads it at 22:05 KST using the
+dedicated read-only key, without HA login or OTP.
+
+Follow [daily review instructions](daily-review.md). Analyze unknown/new packet
+signatures including possible doorbell and wallpad door-open events, lighting and
+thermostat changes. Evidence is passive; meanings are hypotheses until repeated
+marked experiments and control intervals distinguish them. Raw payload decoding
+requires separately inspected HA-local samples; hashes cannot establish payload meaning.
+
+Create a draft PR only for a reproducible repair supported by current data. Never
+write master, merge, enable auto-merge, create a release, install an update or actuate
+devices during the scheduled review. Owner review and explicit approval for the
+specific PR are required before merge; a candidate version in the branch is not
+a published version. Existing pending PRs must be checked to avoid duplicate repairs.
+
+The unattended runner must have the key in its own approved secret store. A private
+scratch file working today does not prove future scheduled executions can access it.
+Report unavailable credentials/data as a blocked analysis, not as a healthy system.

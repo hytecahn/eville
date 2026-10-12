@@ -14,6 +14,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ezville_monitor'))
 import archive
 import collector
 import remote_api
+import daily
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import read_remote
 
@@ -173,6 +174,58 @@ class RemoteTests(unittest.TestCase):
             self.assertTrue(guard.allow(1000))
         self.assertFalse(guard.allow(1000))
         self.assertTrue(guard.allow(1061))
+
+    def test_daily_reports_disabled_or_unknown_without_claiming_delivery(self):
+        result = self.read('/v1/daily')
+        self.assertIsNone(result['daily_enabled'])
+        self.assertIsNone(result['latest_delivery'])
+        self.assertEqual(result['summary_source'], 'preview')
+        disabled = remote_api.daily_snapshot(self.database, 'home', {'daily_enabled': False}, time.time())
+        self.assertFalse(disabled['daily_enabled'])
+
+    def test_daily_preserves_saved_new_patterns_and_removes_private_samples(self):
+        now = time.time()
+        day, start, end = daily.window(now)
+        summary = daily.summarize(self.database, 'home', start, end)
+        summary['packet_patterns'] = [{'signature': '99:01:02:00', 'known': False, 'count': 3,
+                                     'first': start + 1, 'last': start + 2, 'samples': ['F799010200AABB']}]
+        summary['new_packet_patterns'] = ['99:01:02:00']
+        summary['packet_markers'] = [{'at': start + 1, 'label': 'bell', 'candidates': [
+            {'signature': '99:01:02:00', 'before': 0, 'after': 3, 'sample': 'F799010200AABB'}]}]
+        summary['calls'] = [{'at': start + 2, 'request_id': 'private-call-id'}]
+        daily.initialize(self.db)
+        self.db.execute('INSERT INTO daily_state VALUES (?,?)', ('enabled_since', start - 1))
+        self.db.execute('INSERT INTO daily_reports VALUES (?,?,?,?)', (day, 'done', end + 100, json.dumps(summary)))
+        self.db.commit()
+        result = self.read('/v1/daily')
+        self.assertEqual(result['summary_source'], 'saved_report')
+        self.assertEqual(result['summary']['new_packet_patterns'], ['99:01:02:00'])
+        self.assertEqual(result['latest_delivery']['status'], 'done')
+        self.assertNotIn('F799010200AABB', json.dumps(result))
+        self.assertNotIn('private-call-id', json.dumps(result))
+        self.assertEqual(result['summary']['packet_patterns'][0]['sample_byte_lengths'], [7])
+
+    def test_daily_requires_signature_and_rejects_write_payloads(self):
+        request, _ = self.request('/v1/daily', key='wrong')
+        self.assertEqual(self.status(request), 401)
+        request, _ = self.request('/v1/daily', {'daily_enabled': True})
+        self.assertEqual(self.status(request), 400)
+
+    def test_daily_limits_discovery_and_reports_coverage(self):
+        now = time.time()
+        day, start, end = daily.window(now)
+        summary = daily.summarize(self.database, 'home', start, end)
+        summary['packet_patterns'] = [{'signature': '99:01:02:%02X' % i, 'known': False,
+            'count': i + 1, 'first': start, 'last': start, 'samples': []} for i in range(130)]
+        summary['new_packet_patterns'] = [item['signature'] for item in summary['packet_patterns']]
+        daily.initialize(self.db)
+        self.db.execute('INSERT INTO daily_reports VALUES (?,?,?,?)', (day, 'done', end + 100, json.dumps(summary)))
+        self.db.commit()
+        result = self.read('/v1/daily')
+        self.assertTrue(result['truncated'])
+        self.assertEqual(result['totals_before_limits']['packet_patterns'], 130)
+        self.assertEqual(len(result['summary']['packet_patterns']), 128)
+        self.assertEqual(result['summary']['packet_patterns'][0]['count'], 130)
 
     def test_request_body_and_method_bound_to_signature(self):
         stamp=str(int(time.time()))
