@@ -1,0 +1,6 @@
+[Unit]
+Description=External EzVille collector freshness check
+[Service]
+Type=oneshot
+User=ezville-analysis
+ExecStart=/usr/bin/python3 /opt/eville/monitoring/health.py --database /var/lib/ezville/telemetry.sqlite

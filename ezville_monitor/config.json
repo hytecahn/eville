@@ -1,0 +1,11 @@
+{
+  "name": "EzVille Monitor", "version": "0.1.0", "slug": "ezville_monitor",
+  "description": "Outbound diagnostic log collection; no browser login or device commands",
+  "arch": ["aarch64", "amd64"], "startup": "application", "boot": "auto",
+  "map": ["share:ro"], "hassio_api": true, "hassio_role": "default",
+  "options": {"log_path": "/share/simple_mqtt_ezville_control.log", "node_id": "home",
+    "receiver_url": "https://receiver.example.invalid/ingest", "shared_secret": "", "target_slug": "",
+    "poll_seconds": 60, "max_batches": 1000},
+  "schema": {"log_path": "str", "node_id": "str", "receiver_url": "url",
+    "shared_secret": "password", "target_slug": "str", "poll_seconds": "int(10,600)", "max_batches": "int(10,10000)"}
+}

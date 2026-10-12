@@ -1,0 +1,8 @@
+[Unit]
+Description=Publish validated EzVille maintenance as a draft PR
+[Service]
+Type=oneshot
+User=ezville-publisher
+EnvironmentFile=/etc/ezville/publisher.env
+ExecStart=/usr/bin/python3 /opt/eville/monitoring/publish.py --output-from /var/lib/ezville/last-successful-result
+TimeoutStartSec=600
