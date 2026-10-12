@@ -115,7 +115,7 @@ class DailyTests(unittest.TestCase):
         self.assertIn('F799', daily.render(report, raw_samples=True))
 
     def test_profile_hourly_rates_and_bounded_variant_breakdown(self):
-        fingerprint = hashlib.sha256(b'F799010200AA').hexdigest()
+        fingerprint = hashlib.sha256(b'F799010200AA').hexdigest()[:32]
         for offset, count in [(120, 7), (3720, 20)]:
             at = self.start + offset
             profile = {'signature': '99:01:02:00', 'known': False, 'count': count,
