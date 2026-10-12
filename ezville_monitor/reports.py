@@ -30,8 +30,10 @@ def report(database, node, now, days=7):
                     gaps.append(event['text'])
             elif kind == 'log':
                 text = event['text']
+                if '[CONFIG]' in text:
+                    continue
                 for category, pattern in [('watchdog', r'\[WATCHDOG\]'), ('error', r'ERROR|Traceback|Exception'),
-                                           ('timeout', r'timeout|타임아웃'), ('health', r'\[HEALTH\]')]:
+                                           ('timeout', r'TimeoutError|timed out|(?:ERROR|WARNING).*?(?:\btimeout\b|타임아웃)'), ('health', r'\[HEALTH\]')]:
                     if re.search(pattern, text, re.I):
                         counts[category] += 1
                         if category != 'health' and len(examples) < 30:

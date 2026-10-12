@@ -45,6 +45,12 @@ class LocalTests(unittest.TestCase):
         self.assertEqual(result['latest_status']['addon']['version'], '0.0.13')
         self.assertFalse(result['observation_complete'])
 
+    def test_normal_configuration_is_not_a_timeout_incident(self):
+        self.log.write_text('[CONFIG] {"ew11_timeout":600}\n[DEBUG] 상태 정상 (타임아웃:300초)\n[WARNING] EW11 수신 타임아웃\nTimeoutError\n')
+        now=time.time()
+        self.collect(now)
+        self.assertEqual(report(self.database,'home',now)['counts']['timeout'],2)
+
     def test_complete_window_and_stale(self):
         now = time.time()
         for stamp in range(int(now)-600, int(now)+1, 60):
