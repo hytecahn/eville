@@ -14,6 +14,7 @@ def report(database, node, now, days=7):
     statuses = Counter()
     batch_count = 0
     latest_status = {}
+    latest_source_exists = False
     log_line_count = 0
     latest_log_collected_at = None
     for collected, body in rows:
@@ -23,6 +24,7 @@ def report(database, node, now, days=7):
             if kind == 'collector_heartbeat':
                 beats.append(collected)
                 latest_status = event.get('status', {})
+                latest_source_exists = bool(event.get('source_exists', False))
                 missing += not event.get('source_exists', False)
                 for name, item in event.get('status', {}).items():
                     if isinstance(item, dict):
@@ -51,7 +53,7 @@ def report(database, node, now, days=7):
             'latest_log_collected_at': latest_log_collected_at, 'collector_max_gap_seconds': max_gap,
             'source_missing_samples': missing, 'explicit_gaps': gaps,
             'observation_complete': complete, 'counts': dict(counts), 'status_counts': dict(statuses), 'examples': examples,
-            'latest_status': latest_status, 'limitations': ['Times describe collection, not necessarily event occurrence.',
+            'latest_status': latest_status, 'latest_source_exists': latest_source_exists, 'limitations': ['Times describe collection, not necessarily event occurrence.',
                            'Collector heartbeat does not prove HA or device health.',
                            'No elevator commands are sent by this workflow.']}
 

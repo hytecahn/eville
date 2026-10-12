@@ -136,3 +136,16 @@ Local HTTP integration tests simulate a real source file append, independent aut
 reads, heartbeat-only cycles, server/database restart and authentication failures. They are
 not a substitute for testing the deployed HTTPS tunnel. Until the admin connection and
 external key provisioning complete, mark the remote route **implemented, not operational**.
+
+### Durable scheduled external check
+
+The optional `EzVille independent collection check` GitHub workflow reads the signed health
+API hourly (:17), outside the NUC, and returns success/failure without printing reports,
+error samples, keys or private metrics. It requires neither OpenAI nor a GitHub write token.
+After the deployed HTTPS acceptance test passes, configure repository Actions secrets
+`EZVILLE_MONITOR_ORIGIN` and `EZVILLE_REMOTE_SECRET`, and set repository variable
+`EZVILLE_REMOTE_CHECK_ENABLED=true`. Until then the workflow is disabled.
+Use this secret store for the unattended runner; do not place the key in workflow YAML or
+automation prompts. GitHub schedule timing is approximate. Configure your GitHub workflow
+failure notification preference if alerts are wanted. This is an external collection
+freshness check, not proof of device success or an AI code-repair executor.

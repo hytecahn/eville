@@ -46,9 +46,18 @@ def main():
     p.add_argument('endpoint',choices=['health','report','recent'])
     p.add_argument('--origin',required=True)
     p.add_argument('--key-file',type=Path)
+    p.add_argument('--check',action='store_true',help='Return freshness exit status without exposing telemetry in CI logs')
     a=p.parse_args()
     key = a.key_file.read_text().strip() if a.key_file else os.environ['EZVILLE_REMOTE_SECRET']
-    print(json.dumps(query(a.origin,key,a.endpoint),ensure_ascii=False,indent=2))
+    result=query(a.origin,key,a.endpoint)
+    if a.check:
+        if a.endpoint != 'health':
+            raise ValueError('--check requires health')
+        if not result.get('collector_receiving') or not result.get('latest_source_exists'):
+            raise SystemExit('Monitor collection is stale or source is unavailable.')
+        print('Authenticated monitor collection check passed. Device success is unverified.')
+    else:
+        print(json.dumps(result,ensure_ascii=False,indent=2))
 
 
 if __name__ == '__main__':

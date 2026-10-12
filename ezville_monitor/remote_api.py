@@ -148,7 +148,7 @@ def handler(database, node, secret):
                     result = snapshot(database, node, now)
                     if self.path == '/v1/health':
                         result = {key: result[key] for key in ('node', 'window_end','batch_count', 'log_line_count',
-                            'latest_log_collected_at', 'collector_age_seconds', 'collector_receiving', 'latest_status')}
+                            'latest_log_collected_at', 'collector_age_seconds', 'collector_receiving', 'latest_status', 'latest_source_exists')}
                     else:
                         result['examples'] = [redact(item).encode()[:4096].decode('utf-8',errors='ignore') for item in result['examples']]
                 return self.reply(200, result, nonce)
