@@ -14,6 +14,9 @@ def report(database, node, now, days=7):
     statuses = Counter()
     batch_count = 0
     latest_status = {}
+    latest_source_exists = False
+    log_line_count = 0
+    latest_log_collected_at = None
     for collected, body in rows:
         batch_count += 1
         for event in json.loads(body)['events']:
@@ -21,6 +24,7 @@ def report(database, node, now, days=7):
             if kind == 'collector_heartbeat':
                 beats.append(collected)
                 latest_status = event.get('status', {})
+                latest_source_exists = bool(event.get('source_exists', False))
                 missing += not event.get('source_exists', False)
                 for name, item in event.get('status', {}).items():
                     if isinstance(item, dict):
@@ -29,6 +33,8 @@ def report(database, node, now, days=7):
                 if len(gaps) < 30:
                     gaps.append(event['text'])
             elif kind == 'log':
+                log_line_count += 1
+                latest_log_collected_at = collected
                 text = event['text']
                 if '[CONFIG]' in text:
                     continue
@@ -43,10 +49,11 @@ def report(database, node, now, days=7):
     max_gap = max(b-a for a, b in zip(checkpoints, checkpoints[1:]))
     complete = bool(beats) and max_gap <= 180 and not missing and not gaps
     return {'node': node, 'window_start': start, 'window_end': now,
-            'batch_count': batch_count, 'collector_max_gap_seconds': max_gap,
+            'batch_count': batch_count, 'log_line_count': log_line_count,
+            'latest_log_collected_at': latest_log_collected_at, 'collector_max_gap_seconds': max_gap,
             'source_missing_samples': missing, 'explicit_gaps': gaps,
             'observation_complete': complete, 'counts': dict(counts), 'status_counts': dict(statuses), 'examples': examples,
-            'latest_status': latest_status, 'limitations': ['Times describe collection, not necessarily event occurrence.',
+            'latest_status': latest_status, 'latest_source_exists': latest_source_exists, 'limitations': ['Times describe collection, not necessarily event occurrence.',
                            'Collector heartbeat does not prove HA or device health.',
                            'No elevator commands are sent by this workflow.']}
 

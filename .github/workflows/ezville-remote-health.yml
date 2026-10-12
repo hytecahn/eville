@@ -1,0 +1,28 @@
+name: EzVille independent collection check
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ezville-remote-health
+  cancel-in-progress: false
+jobs:
+  check:
+    if: vars.EZVILLE_REMOTE_CHECK_ENABLED == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read monitor independently of HA login
+        env:
+          EZVILLE_MONITOR_ORIGIN: ${{ secrets.EZVILLE_MONITOR_ORIGIN }}
+          EZVILLE_REMOTE_SECRET: ${{ secrets.EZVILLE_REMOTE_SECRET }}
+        run: python monitoring/read_remote.py health --origin "$EZVILLE_MONITOR_ORIGIN" --check

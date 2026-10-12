@@ -22,4 +22,5 @@ jobs:
         run: >-
           docker run --rm --network none --entrypoint python
           -v "$PWD/monitoring/tests:/repo/monitoring/tests:ro"
+          -v "$PWD/monitoring/read_remote.py:/repo/monitoring/read_remote.py:ro"
           ezville-monitor-test -m unittest discover -s /repo/monitoring/tests -v
