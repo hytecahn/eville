@@ -290,10 +290,11 @@ def initialize(db):
     db.execute('CREATE TABLE IF NOT EXISTS daily_reports (day TEXT PRIMARY KEY, status TEXT, attempted REAL, body TEXT)')
     db.execute('CREATE TABLE IF NOT EXISTS daily_state (key TEXT PRIMARY KEY, value REAL)')
     db.execute('CREATE TABLE IF NOT EXISTS packet_patterns (signature TEXT PRIMARY KEY, first_seen REAL, known INTEGER, sample TEXT)')
+    db.execute('CREATE TABLE IF NOT EXISTS daily_manual_runs (day TEXT PRIMARY KEY, attempted REAL, status TEXT)')
     db.commit()
 
 
-def run_daily(database, options, now, token):
+def run_daily(database, options, now, token, force=False):
     if not options.get('daily_enabled'):
         return False
     day, start, end = window(now)
@@ -301,18 +302,28 @@ def run_daily(database, options, now, token):
         return False  # Let the final 22:00 packet bucket flush and reach the collector.
     with sqlite3.connect(database) as db:
         initialize(db)
+        db.execute('BEGIN IMMEDIATE')
         first = db.execute("SELECT value FROM daily_state WHERE key='enabled_since'").fetchone()
         if first is None:
             db.execute("INSERT INTO daily_state VALUES ('enabled_since', ?)", (now,))
-            db.commit()
-            return False  # Do not send a partial past-day report when the feature is first enabled.
-        if end <= first[0]:
+            if not force:
+                db.commit()
+                return False  # The scheduled job waits for a complete first window.
+        if not force and end <= first[0]:
             return False
         row = db.execute('SELECT status,attempted,body FROM daily_reports WHERE day=?', (day,)).fetchone()
-        if row and (row[0] in ('done', 'running') or now - row[1] < 3600):
+        manual = db.execute('SELECT attempted,status FROM daily_manual_runs WHERE day=?', (day,)).fetchone()
+        if (row and row[0] == 'running') or (manual and manual[1] == 'running'):
             return False
-        # Store before delivery; crash after posting must not send a second mobile push.
-        db.execute('INSERT OR REPLACE INTO daily_reports VALUES (?,?,?,?)', (day, 'running', now, '{}'))
+        if force:
+            if manual and now - manual[0] < 60:
+                return False
+            db.execute('INSERT OR REPLACE INTO daily_manual_runs VALUES (?,?,?)', (day, now, 'running'))
+        elif row and (row[0] == 'done' or now - row[1] < 3600):
+            return False
+        # Preserve an earlier successful report until a manual resend succeeds.
+        if not (force and row and row[0] == 'done'):
+            db.execute('INSERT OR REPLACE INTO daily_reports VALUES (?,?,?,?)', (day, 'running', now, '{}'))
         db.commit()
     try:
         summary = summarize(database, options['node_id'], start, end)
@@ -323,8 +334,13 @@ def run_daily(database, options, now, token):
             db.executemany('INSERT OR IGNORE INTO packet_patterns VALUES (?,?,?,?)', [
                 (item['signature'], item['first'], int(item['known']), item['samples'][0] if item['samples'] else '')
                 for item in summary['packet_patterns']])
+            if force:
+                db.execute('UPDATE daily_manual_runs SET status=? WHERE day=?', ('done', day))
         return True
     except Exception as error:
         with sqlite3.connect(database) as db:
-            db.execute('UPDATE daily_reports SET status=?,body=? WHERE day=?', ('error', json.dumps({'error': type(error).__name__}), day))
+            if not (force and row and row[0] == 'done'):
+                db.execute('UPDATE daily_reports SET status=?,body=? WHERE day=?', ('error', json.dumps({'error': type(error).__name__}), day))
+            if force:
+                db.execute('UPDATE daily_manual_runs SET status=? WHERE day=?', ('error', day))
         return False

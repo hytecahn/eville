@@ -94,7 +94,7 @@ def main():
         initialize_daily(db)
         db.execute("DELETE FROM daily_state WHERE key='enabled_since'")
         db.commit()
-    server = serve(database, options['node_id'])
+    server = serve(database, options['node_id'], options)
     remote_server = None
     if options.get('remote_enabled'):
         from remote_api import serve as serve_remote

@@ -1,8 +1,9 @@
-"""Opt-in, read-only API for a TLS tunnel; independent of HA browser authentication."""
+"""Signed read API and separately keyed, opt-in manual daily report action."""
 from collections import deque
 from contextlib import closing
 import hashlib
 import hmac
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
@@ -15,6 +16,7 @@ from protocol import redact
 MAX_REQUEST = 1024
 MAX_RESPONSE = 262144
 PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily'}
+ACTION_PATH = '/v1/daily/run'
 
 
 def daily_snapshot(database, node, options, now):
@@ -48,7 +50,7 @@ def daily_snapshot(database, node, options, now):
             candidate.pop('sample', None)
     for call in summary['calls']:
         call.pop('request_id', None)
-    return {'node': node, 'monitor_version': '0.6.0', 'window_day': day,
+    return {'node': node, 'monitor_version': '0.6.1', 'window_day': day,
             'daily_enabled': bool(options.get('daily_enabled')) if options is not None else None,
             'mobile_notification_configured': bool(options.get('daily_notify_service')) if options is not None else None,
             'enabled_since': state.get('enabled_since'),
@@ -63,6 +65,11 @@ def daily_snapshot(database, node, options, now):
 
 def sign(secret, method, path, timestamp, nonce, body):
     envelope = '\n'.join(('ezville-read-v1', method, path, timestamp, nonce)).encode() + b'\n' + body
+    return hmac.new(secret.encode(), envelope, hashlib.sha256).hexdigest()
+
+
+def sign_action(secret, method, path, timestamp, nonce, body):
+    envelope = '\n'.join(('ezville-action-v1', method, path, timestamp, nonce)).encode() + b'\n' + body
     return hmac.new(secret.encode(), envelope, hashlib.sha256).hexdigest()
 
 
@@ -81,12 +88,12 @@ class Guard:
             self.requests.append(now)
             return True
 
-    def authenticate(self, secret, path, stamp, nonce, body, supplied, now):
+    def authenticate(self, secret, path, stamp, nonce, body, supplied, now, signer=sign):
         if not isinstance(stamp, str) or not re.fullmatch(r'\d{10}', stamp) or abs(now-int(stamp)) > 60:
             return False
         if not isinstance(nonce, str) or not re.fullmatch(r'[a-f0-9]{32}', nonce):
             return False
-        if not hmac.compare_digest(sign(secret, 'POST', path, stamp, nonce, body), supplied):
+        if not hmac.compare_digest(signer(secret, 'POST', path, stamp, nonce, body), supplied):
             return False
         with self.lock:
             self.nonces = {key: expiry for key, expiry in self.nonces.items() if expiry >= now}
@@ -138,6 +145,7 @@ class LimitedServer(ThreadingHTTPServer):
 
 def handler(database, node, secret, options=None):
     guard = Guard()
+    action_secret = (options or {}).get('remote_action_secret', '')
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
             super().setup()
@@ -146,7 +154,7 @@ def handler(database, node, secret, options=None):
         def log_message(self, *_):
             pass
 
-        def reply(self, status, data, nonce=''):
+        def reply(self, status, data, nonce='', action=False):
             body = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode()
             if len(body) > MAX_RESPONSE:
                 status, body = 503, b'{}'
@@ -157,7 +165,9 @@ def handler(database, node, secret, options=None):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('X-Ezville-Time', stamp)
-            self.send_header('X-Ezville-Signature', sign(secret, 'RESPONSE:' + str(status), self.path, stamp, nonce, body))
+            signer = sign_action if action else sign
+            self.send_header('X-Ezville-Signature', signer(action_secret if action else secret,
+                'RESPONSE:' + str(status), self.path, stamp, nonce, body))
             self.end_headers()
             self.wfile.write(body)
 
@@ -165,26 +175,41 @@ def handler(database, node, secret, options=None):
             self.reply(404, {})
 
         def do_POST(self):
-            if self.path not in PATHS:
+            action = self.path == ACTION_PATH
+            if self.path not in PATHS and not action:
                 return self.reply(404, {})
+            if action and (not options or not options.get('daily_enabled')
+                           or not isinstance(action_secret, str) or len(action_secret) < 32
+                           or hmac.compare_digest(action_secret, secret)):
+                return self.reply(404, {}, action=True)
             now = time.time()
             if not guard.allow(now):
-                return self.reply(429, {})
+                return self.reply(429, {}, action=action)
             try:
                 if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
-                    return self.reply(400, {})
+                    return self.reply(400, {}, action=action)
                 size = int(self.headers['Content-Length'])
                 if not 0 < size <= MAX_REQUEST:
-                    return self.reply(413, {})
+                    return self.reply(413, {}, action=action)
                 body = self.rfile.read(size)
                 nonce = self.headers.get('X-Ezville-Nonce', '')
-                if len(body) != size or not guard.authenticate(secret, self.path,
+                authenticated = len(body) == size and guard.authenticate(
+                    action_secret if action else secret, self.path,
                     self.headers.get('X-Ezville-Time'), nonce, body,
-                    self.headers.get('X-Ezville-Signature', ''), now):
-                    return self.reply(401, {})
+                    self.headers.get('X-Ezville-Signature', ''), now,
+                    sign_action if action else sign)
+                if not authenticated:
+                    return self.reply(401, {}, action=action)
                 payload = json.loads(body)
                 if not isinstance(payload, dict) or set(payload) - ({'limit'} if self.path == '/v1/recent' else set()):
-                    return self.reply(400, {}, nonce)
+                    return self.reply(400, {}, nonce, action=action)
+                if action:
+                    from daily import run_daily, window
+                    self.connection.settimeout(30)
+                    ran = run_daily(database, options, now, os.environ['SUPERVISOR_TOKEN'], force=True)
+                    result = {'ran': ran, 'window_day': window(now)[0],
+                              'message': 'HA API delivery attempted' if ran else 'Not run; check due time, running state or duplicate limit'}
+                    return self.reply(200 if ran else 409, result, nonce, action=True)
                 if self.path == '/v1/recent':
                     limit = payload.get('limit',20)
                     if type(limit) is not int or not 1 <= limit <= 30:
@@ -201,9 +226,9 @@ def handler(database, node, secret, options=None):
                         result['examples'] = [redact(item).encode()[:4096].decode('utf-8',errors='ignore') for item in result['examples']]
                 return self.reply(200, result, nonce)
             except (ValueError, TypeError, KeyError):
-                return self.reply(400, {})
+                return self.reply(400, {}, action=action)
             except (OSError, sqlite3.Error):
-                return self.reply(503, {})
+                return self.reply(503, {}, action=action)
     return Handler
 
 

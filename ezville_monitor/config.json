@@ -1,6 +1,6 @@
 {
   "name": "EzVille Monitor",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "slug": "ezville_monitor",
   "description": "HA-local log archive, Monday 08:00 KST analysis and draft maintenance PRs",
   "arch": [
@@ -26,6 +26,7 @@
     "publish_pr": false,
     "ai_model": "gpt-5.4",
     "remote_enabled": false,
+    "remote_action_secret": "",
     "daily_enabled": false,
     "daily_notify_service": ""
   },
@@ -43,6 +44,7 @@
     "ai_model": "str",
     "remote_enabled": "bool",
     "remote_secret": "password?",
+    "remote_action_secret": "password?",
     "daily_enabled": "bool",
     "daily_notify_service": "str?"
   },

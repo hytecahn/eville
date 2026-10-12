@@ -90,6 +90,29 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0][1], '2026-10-13')
 
+    def test_manual_run_resends_only_after_cooldown_and_preserves_saved_report_on_failure(self):
+        options = {'daily_enabled': True, 'node_id': 'home'}
+        now = self.end + 100
+        with patch.object(daily, 'notify') as send:
+            self.assertFalse(daily.run_daily(self.db, options, now, 'test'))  # First enablement.
+            self.assertTrue(daily.run_daily(self.db, options, now + 1, 'test', force=True))
+            self.assertFalse(daily.run_daily(self.db, options, now + 2, 'test', force=True))
+            self.assertFalse(daily.run_daily(self.db, options, now + 62, 'test'))
+            self.assertEqual(send.call_count, 1)
+        with sqlite3.connect(self.db) as db:
+            before = db.execute('SELECT body FROM daily_reports WHERE day=?', ('2026-10-13',)).fetchone()[0]
+        with patch.object(daily, 'notify', side_effect=OSError('HA unavailable')):
+            self.assertFalse(daily.run_daily(self.db, options, now + 62, 'test', force=True))
+        with sqlite3.connect(self.db) as db:
+            status, body = db.execute('SELECT status,body FROM daily_reports WHERE day=?', ('2026-10-13',)).fetchone()
+            self.assertEqual((status, body), ('done', before))
+
+    def test_manual_run_rejects_before_final_bucket_is_due(self):
+        with patch.object(daily, 'notify') as send:
+            self.assertFalse(daily.run_daily(self.db, {'daily_enabled': True, 'node_id': 'home'},
+                                             self.end + 10, 'test', force=True))
+            send.assert_not_called()
+
     def test_notification_target_rejects_arbitrary_service(self):
         with self.assertRaises(ValueError):
             daily.notify('token', '2026-10-13', 'report', 'homeassistant.restart')
