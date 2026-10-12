@@ -3,6 +3,7 @@ import ast
 import base64
 import datetime as dt
 import json
+import os
 from pathlib import Path
 import sqlite3
 import time
@@ -197,5 +198,8 @@ def worker(database, options, stop):
     # A process interrupted in "running" state is not automatically replayed: inspect
     # the local report first, preventing repeated billable calls/duplicate publication.
     while not stop.is_set():
+        if options.get('daily_enabled'):
+            from daily import run_daily
+            run_daily(database, options, time.time(), os.environ['SUPERVISOR_TOKEN'])
         run_week(database, options, time.time())
         stop.wait(60)

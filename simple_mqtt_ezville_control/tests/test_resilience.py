@@ -118,6 +118,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(t == 'ew11/send' for t, _ in client.publications))
         client.emit('ezville/batch_01_01/elevator-down/command', b'PRESS')
         await self.wait_for(lambda: any(t == 'ew11/send' for t, _ in client.publications))
+        await self.wait_for(lambda: any('[EVENT] elevator_call_sent direction=down' in line for line in self.logs))
+        self.assertEqual(sum('[EVENT] elevator_call_sent' in line for line in self.logs), 1)
         self.assertEqual(len(FakeClient.instances), 1)
 
     async def test_checksum_valid_but_short_state_frame_is_rejected(self):
@@ -134,6 +136,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         event = json.loads(next(p for t, p in client.publications if t == 'ezville/elevator/arrival'))
         self.assertEqual(event['event'], 'elevator_arrival')
         self.assertGreater(event['timestamp'], 1700000000)
+        self.assertTrue(any('[EVENT] elevator_arrival_signal' in line for line in self.logs))
 
     async def test_cleanup_timeout_exits_worker_instead_of_reusing_client(self):
         client = await self.start()

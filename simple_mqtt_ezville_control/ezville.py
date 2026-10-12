@@ -10,8 +10,9 @@ import logging
 import os
 import sys
 import traceback
+import uuid
 
-from logging.handlers import TimedRotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
 
 from threading import Thread
 from queue import Queue, Empty, Full
@@ -20,6 +21,7 @@ import signal
 import faulthandler
 import math
 from runtime import bounded_call, heartbeat_loop, cancel_tasks
+from packet_profile import PacketProfiler
 
 # DEVICE 별 패킷 정보
 RS485_DEVICE = {
@@ -164,6 +166,9 @@ ACK_HEADER = {
 diagnostic_logger = logging.getLogger('simple_mqtt_ezville_control')
 diagnostic_logger.setLevel(logging.INFO)
 diagnostic_logger.propagate = False
+packet_logger = logging.getLogger('simple_mqtt_ezville_control.packets')
+packet_logger.setLevel(logging.INFO)
+packet_logger.propagate = False
 
 
 def init_diagnostic_logging(config):
@@ -184,18 +189,31 @@ def init_diagnostic_logging(config):
             previous.close()
         diagnostic_logger.handlers.clear()
         diagnostic_logger.addHandler(handler)
+        packet_handler = RotatingFileHandler(log_file + '.packet.log', maxBytes=8 * 1024 * 1024,
+                                             backupCount=3, encoding='utf-8')
+        packet_handler.setFormatter(logging.Formatter('%(message)s'))
+        for previous in packet_logger.handlers:
+            previous.close()
+        packet_logger.handlers.clear()
+        packet_logger.addHandler(packet_handler)
     except OSError as error:
         print('[WARNING] diagnostic file unavailable; console logging only: {}'.format(error), flush=True)
 
 
 # LOG 메시지
 def log(string):
-    date = time.strftime('%Y-%m-%d %p %I:%M:%S', time.localtime(time.time()))
-    message = '[{}] {}'.format(date, string)
+    now = time.time()
+    date = time.strftime('%Y-%m-%d %p %I:%M:%S', time.localtime(now))
+    message = '[{}] [ts_ms={}] {}'.format(date, int(now * 1000), string)
     print(message, flush=True)
     if diagnostic_logger.handlers:
         diagnostic_logger.info(message)
     return
+
+
+def packet_log(string):
+    if packet_logger.handlers:
+        packet_logger.info('[ts_ms={}] {}'.format(int(time.time() * 1000), string))
 
 # CHECKSUM 및 ADD를 마지막 4 BYTE에 추가
 def checksum(input_hex):
@@ -271,6 +289,7 @@ async def ezville_loop(config):
     debug = config['DEBUG_LOG']
     mqtt_log = config['MQTT_LOG']
     ew11_log = config['EW11_LOG']
+    packet_profiler = PacketProfiler(packet_log)
     
     # 통신 모드 설정: mixed, socket, mqtt
     comm_mode = config['mode']
@@ -413,12 +432,12 @@ async def ezville_loop(config):
                     log('[INFO] MQTT Integration 오프라인')
                     MQTT_ONLINE = False
         # 나머지 topic은 모두 Queue에 보관
-        elif msg.topic == EW11_TOPIC + '/recv' or (
+        elif msg.topic in (EW11_TOPIC + '/recv', HA_TOPIC + '/packet/mark') or (
                 msg.topic.startswith(HA_TOPIC + '/') and msg.topic.endswith('/command')):
             if msg.topic == EW11_TOPIC + '/recv':
                 last_received_time = time.monotonic()
-            if msg.retain and msg.topic.endswith('/command'):
-                log('[WARNING] retained control command ignored')
+            if msg.retain and (msg.topic.endswith('/command') or msg.topic.endswith('/packet/mark')):
+                log('[WARNING] retained command/packet marker ignored')
                 return
             try:
                 MSG_QUEUE.put_nowait(msg)
@@ -469,6 +488,10 @@ async def ezville_loop(config):
                     await HA_process(topics, msg.payload.decode('utf-8'))
                 except (ValueError, IndexError, UnicodeError) as error:
                     log('[WARNING] invalid command rejected: {}'.format(type(error).__name__))
+            elif msg.topic == HA_TOPIC + '/packet/mark':
+                label = msg.payload.decode('ascii', errors='ignore') if len(msg.payload) <= 16 else ''
+                if not packet_profiler.mark(label):
+                    log('[WARNING] packet marker rejected')
             elif msg.topic == EW11_TOPIC + '/recv':
                 await EW11_process(msg.payload.hex().upper())
             await asyncio.sleep(0)
@@ -523,11 +546,14 @@ async def ezville_loop(config):
                     # ACK 패킷인지 확인
                     elif packet[2:4] in ACK_HEADER and packet[6:8] in ACK_HEADER[packet[2:4]][1]:
                         ACK_PACKET = True
+
+                    packet_profiler.observe(packet, STATE_PACKET or ACK_PACKET or packet == 'F7330143018007F6')
                     
                     # 엘리베이터 도착 패킷 감지: F7330143018007F6 (고정 14문자)
                     # 패킷 분석: F7=시작, 33=엘리베이터, 0143=도착명령, 018007=도착상태, F6=체크섬/add
                     if packet == 'F7330143018007F6':
                         try:
+                            log('[EVENT] elevator_arrival_signal')
                             payload = {'event': 'elevator_arrival', 'packet': packet, 'timestamp': int(time.time())}
                             mqtt_client.publish(HA_TOPIC + '/elevator/arrival', json.dumps(payload))
                             log('[ALERT] Elevator arrival detected: {}'.format(packet))
@@ -765,12 +791,16 @@ async def ezville_loop(config):
 
         deviceID = '{}_{:0>2d}_{:0>2d}'.format(device, id1, id2)
         key = deviceID + state
+        previous = DEVICE_STATE.get(key)
         
-        if value != DEVICE_STATE.get(key) or FORCE_UPDATE:
+        if value != previous or FORCE_UPDATE:
             topic = STATE_TOPIC.format(deviceID, state)
             publish_checked(topic, value.encode())
             DEVICE_STATE[key] = value
             last_state_update_time = time.monotonic()
+            if previous is not None and previous != value and device in ('light', 'thermostat'):
+                log('[EVENT] device_state_changed device={} address={:02d}_{:02d} field={} from={} to={}'.format(
+                    device, id1, id2, state, previous, value))
                     
             if mqtt_log:
                 log('[LOG] ->> HA : {} >> {}'.format(topic, value))
@@ -925,8 +955,10 @@ async def ezville_loop(config):
                     recvcmd = 'NULL'
                     statcmd = [key, 'NULL']
                     
-                    CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd})
-                    
+                    CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd,
+                                          'elevator_direction': topics[2][len('elevator-'):],
+                                          'elevator_request_id': uuid.uuid4().hex})
+
                     if debug:
                         log('[DEBUG] Queued ::: sendcmd: {}, recvcmd: {}, statcmd: {}'.format(sendcmd, recvcmd, statcmd))
   
@@ -945,6 +977,9 @@ async def ezville_loop(config):
                     session_loop.sock_sendall(soc, bytes.fromhex(send_data['sendcmd'])),
                     timeout=10,
                 )
+            if i == 0 and send_data.get('elevator_request_id'):
+                log('[EVENT] elevator_call_sent direction={} request_id={}'.format(
+                    send_data['elevator_direction'], send_data['elevator_request_id']))
             if debug:                     
                 log('[DEBUG] Iter. No.: {}, Target: {}, Current: {}'.format(i + 1, send_data['statcmd'][1], DEVICE_STATE.get(send_data['statcmd'][0])))
              
@@ -1098,6 +1133,11 @@ async def ezville_loop(config):
                     restart_flag,
                     restart_count))
             await asyncio.sleep(diagnostic_interval)
+
+    async def packet_profile_loop():
+        while True:
+            packet_profiler.tick()
+            await asyncio.sleep(1)
     
     async def initiate_socket():
         log('[INFO] Socket 연결을 시작합니다')
@@ -1186,7 +1226,7 @@ async def ezville_loop(config):
         log('[INFO] 장치 등록 및 상태 업데이트를 시작합니다')
         tasklist = [asyncio.create_task(coro) for coro in (
             state_update_loop(), command_loop(), ew11_health_loop(),
-            addon_health_loop(), mqtt_health_loop(), diagnostic_heartbeat_loop(),
+            addon_health_loop(), mqtt_health_loop(), diagnostic_heartbeat_loop(), packet_profile_loop(),
         )]
         if comm_mode == 'socket':
             tasklist.append(asyncio.create_task(serial_recv_loop()))
@@ -1253,6 +1293,7 @@ async def ezville_loop(config):
             finally:
                 if active is not None:
                     await cancel_tasks([active])
+                packet_profiler.flush()
                 ADDON_STARTED = False
                 if soc is not None:
                     soc.close()

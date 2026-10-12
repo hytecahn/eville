@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir paho-mqtt==2.1.0
 
 # Copy data for add-on
 COPY run.sh /
-COPY ezville.py runtime.py watchdog.py /
+COPY ezville.py runtime.py watchdog.py packet_profile.py /
 
 WORKDIR /share
 
