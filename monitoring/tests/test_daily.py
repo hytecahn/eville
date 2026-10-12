@@ -1,4 +1,5 @@
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -112,6 +113,24 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(report['packet_markers'][0]['candidates'][0]['signature'], '99:01:02:00')
         self.assertNotIn('F799', daily.render(report))
         self.assertIn('F799', daily.render(report, raw_samples=True))
+
+    def test_profile_hourly_rates_and_bounded_variant_breakdown(self):
+        fingerprint = hashlib.sha256(b'F799010200AA').hexdigest()[:32]
+        for offset, count in [(120, 7), (3720, 20)]:
+            at = self.start + offset
+            profile = {'signature': '99:01:02:00', 'known': False, 'count': count,
+                       'first': at, 'last': at + 20, 'bucket_start': at - 20,
+                       'samples': ['F799010200AA'], 'variants': {fingerprint: count - 2},
+                       'other_variant_count': 2, 'variant_changes': 3}
+            self.append(at + 30, [(at + 30, '[PACKET_PROFILE] ' + json.dumps(profile))])
+        item = daily.summarize(self.db, 'home', self.start, self.end)['packet_patterns'][0]
+        self.assertEqual(item['count'], 27)
+        self.assertEqual(item['hourly_counts'][22:24], [7, 20])
+        self.assertEqual(item['active_buckets'], 2)
+        self.assertEqual(item['peak_5min_count'], 20)
+        self.assertEqual(item['tracked_variants'][fingerprint], 23)
+        self.assertEqual(item['other_variant_count'], 4)
+        self.assertEqual(item['variant_changes'], 6)
 
 
 if __name__ == '__main__':

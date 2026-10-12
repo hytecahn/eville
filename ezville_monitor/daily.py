@@ -82,10 +82,47 @@ def summarize(database, node, start, end):
                         if (not re.fullmatch(r'[0-9A-F]{2}(?::[0-9A-F]{2}){3}', key)
                                 or not start <= item['first'] <= item['last'] < end):
                             continue
+                        count = int(item['count'])
+                        if count < 0:
+                            raise ValueError('negative profile count')
                         entry = patterns.setdefault(key, {'signature': key, 'known': bool(item['known']),
-                            'count': 0, 'samples': [], 'first': item['first'], 'last': item['last']})
-                        entry['count'] += int(item['count'])
+                            'count': 0, 'samples': [], 'first': item['first'], 'last': item['last'],
+                            'hourly_counts': [0] * 24, 'active_buckets': 0,
+                            'peak_5min_count': 0, 'peak_5min_at': None,
+                            'tracked_variants': {}, 'other_variant_count': 0, 'variant_changes': 0})
+                        entry['count'] += count
                         entry['last'] = max(entry['last'], item['last'])
+                        # A profile covers one five-minute bucket. Older producers lack
+                        # bucket_start, so their first observed frame supplies the hour.
+                        bucket = item.get('bucket_start', item['first'])
+                        if not start <= bucket < end:
+                            bucket = item['first']
+                        hour = dt.datetime.fromtimestamp(bucket, KST).hour
+                        entry['hourly_counts'][hour] += count
+                        entry['active_buckets'] += 1
+                        if count > entry['peak_5min_count']:
+                            entry['peak_5min_count'] = count
+                            entry['peak_5min_at'] = bucket
+                        variants = item.get('variants', {})
+                        if not isinstance(variants, dict) or len(variants) > 8:
+                            raise ValueError('invalid variants')
+                        for fingerprint, amount in variants.items():
+                            amount = int(amount)
+                            if not re.fullmatch(r'[0-9a-f]{32}', fingerprint) or amount < 0:
+                                raise ValueError('invalid variant')
+                            tracked = entry['tracked_variants']
+                            if fingerprint in tracked:
+                                tracked[fingerprint] += amount
+                            elif len(tracked) < 8:
+                                tracked[fingerprint] = amount
+                            else:
+                                entry['other_variant_count'] += amount
+                        other = int(item.get('other_variant_count', 0))
+                        changes = int(item.get('variant_changes', 0))
+                        if other < 0 or changes < 0 or changes >= count and count > 0:
+                            raise ValueError('invalid variant totals')
+                        entry['other_variant_count'] += other
+                        entry['variant_changes'] += changes
                         for sample in item['samples']:
                             if sample not in entry['samples'] and len(entry['samples']) < 3:
                                 entry['samples'].append(sample[:256])
@@ -211,6 +248,11 @@ def render(summary, max_calls=30, raw_samples=False):
                  + ('' if summary.get('packet_baseline_ready') else ' (첫날 기준선 학습 중)'))
     for item in unknown[:10] if max_calls is not None else unknown:
         details = f"- 미분류 {item['signature']}: {item['count']}회"
+        if item.get('hourly_counts'):
+            peak_hour = max(range(24), key=lambda hour: item['hourly_counts'][hour])
+            details += (f" · 최고 {peak_hour:02d}시 {item['hourly_counts'][peak_hour]}회"
+                        f" · 5분 최고 {item['peak_5min_count']}회"
+                        f" · 추적 변형 {len(item['tracked_variants'])}종/미추적 {item['other_variant_count']}회")
         if raw_samples and item['samples']:
             details += ' · 원문 예시 ' + ', '.join(item['samples'])
         lines.append(details)

@@ -19,6 +19,23 @@ class PacketProfileTests(unittest.TestCase):
         self.assertEqual(len(profiles), 1)
         self.assertEqual(profiles[0]['count'], 500)
         self.assertEqual(len(profiles[0]['samples']), 3)
+        self.assertEqual(len(profiles[0]['variants']), 8)
+        self.assertEqual(profiles[0]['other_variant_count'], 492)
+        self.assertEqual(profiles[0]['variant_changes'], 499)
+        self.assertNotIn('_previous_variant', profiles[0])
+
+    def test_repeated_variants_keep_exact_counts_without_raw_extra_samples(self):
+        lines = []
+        profiler = PacketProfiler(lines.append)
+        profiler.started, profiler.next_flush = 100, 160
+        for packet in ['F799010200AA', 'F799010200AA', 'F799010200BB', 'F799010200AA']:
+            profiler.observe(packet, False, now=101)
+        profiler.flush(160)
+        profile = json.loads(next(line.split('] ', 1)[1] for line in lines
+                                  if line.startswith('[PACKET_PROFILE]')))
+        self.assertEqual(sorted(profile['variants'].values()), [1, 3])
+        self.assertEqual(profile['variant_changes'], 2)
+        self.assertEqual(profile['bucket_start'], 100)
 
     def test_marker_retains_before_after_evidence_without_transmitting(self):
         lines = []

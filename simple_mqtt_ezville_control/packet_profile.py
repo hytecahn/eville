@@ -1,10 +1,12 @@
 """Bounded, passive profile of checksum-valid wallpad frames; never transmits a packet."""
 from collections import Counter, deque
+import hashlib
 import json
 import time
 
 MAX_SIGNATURES = 256
 MAX_TRACE = 300
+MAX_VARIANTS = 8
 
 
 def signature(packet):
@@ -34,8 +36,22 @@ class PacketProfiler:
                 self.overflow += 1
             else:
                 entry = self.patterns[key] = {'signature': key, 'known': bool(known),
-                    'count': 0, 'first': now, 'last': now, 'samples': []}
+                    'count': 0, 'first': now, 'last': now, 'samples': [],
+                    'bucket_start': self.started, 'variants': {}, 'other_variant_count': 0,
+                    'variant_changes': 0}
         if entry is not None:
+            # A 128-bit digest keeps the retained five-minute profile compact.
+            fingerprint = hashlib.sha256(packet.encode('ascii')).hexdigest()[:32]
+            if entry.get('_previous_variant') is not None and entry['_previous_variant'] != fingerprint:
+                entry['variant_changes'] += 1
+            entry['_previous_variant'] = fingerprint
+            variants = entry['variants']
+            if fingerprint in variants:
+                variants[fingerprint] += 1
+            elif len(variants) < MAX_VARIANTS:
+                variants[fingerprint] = 1
+            else:
+                entry['other_variant_count'] += 1
             entry['count'] += 1
             entry['last'] = now
             if packet not in entry['samples'] and len(entry['samples']) < 3:
@@ -72,7 +88,8 @@ class PacketProfiler:
             'total': sum(entry['count'] for entry in self.patterns.values()) + self.overflow,
             'signatures': len(self.patterns)}, separators=(',', ':')))
         for entry in self.patterns.values():
-            self.write('[PACKET_PROFILE] ' + json.dumps(entry, separators=(',', ':')))
+            self.write('[PACKET_PROFILE] ' + json.dumps({key: value for key, value in entry.items()
+                if not key.startswith('_')}, separators=(',', ':')))
         if self.overflow:
             self.write('[PACKET_OVERFLOW] ' + str(self.overflow))
         self.patterns = {}
