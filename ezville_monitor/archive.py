@@ -1,11 +1,15 @@
 """HA-local archive and fixed-purpose authenticated query API."""
 from contextlib import closing
+import hmac
 import json
+import os
 from pathlib import Path
+import secrets
 import sqlite3
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 from protocol import MAX_BODY, authenticated, signature
 from reports import report
 
@@ -53,15 +57,45 @@ def snapshot(database, node, now, days=7):
     return result
 
 
-def handler(database, node):
+def handler(database, node, options=None):
+    csrf_token = secrets.token_urlsafe(32)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
 
+        def allowed(self):
+            return self.client_address[0] == '172.30.32.2'
+
+        def do_POST(self):
+            if not self.allowed():
+                return self.send_error(403)
+            if self.path != '/daily/run' or not options or not options.get('daily_enabled'):
+                return self.send_error(404)
+            if self.headers.get('Content-Type') != 'application/x-www-form-urlencoded':
+                return self.send_error(415)
+            try:
+                size = int(self.headers.get('Content-Length', '0'))
+                if not 0 < size <= 256:
+                    return self.send_error(413)
+                data = parse_qs(self.rfile.read(size).decode('ascii'), strict_parsing=True)
+                if set(data) != {'csrf'} or len(data['csrf']) != 1 or not hmac.compare_digest(data['csrf'][0], csrf_token):
+                    return self.send_error(403)
+                from daily import run_daily
+                ran = run_daily(database, options, time.time(), os.environ['SUPERVISOR_TOKEN'], force=True)
+                return self.page('일일 보고를 다시 생성하고 HA 알림을 요청했습니다.' if ran else
+                                 '실행되지 않았습니다. 설정, 실행 중 상태, 60초 중복 제한 또는 22:01:30 이후인지 확인하세요.')
+            except (ValueError, UnicodeError, OSError, sqlite3.Error):
+                return self.send_error(503)
+
         def do_GET(self):
+            if self.path not in ('/', ''):
+                return self.send_error(404)
+            return self.page()
+
+        def page(self, message=''):
             import html
             # Supervisor is the sole ingress peer. No host port is published.
-            if self.client_address[0] != '172.30.32.2':
+            if not self.allowed():
                 self.send_error(403)
                 return
             try:
@@ -84,7 +118,13 @@ def handler(database, node):
                 body = ('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
                     '<title>EzVille Monitor</title><style>body{font:16px system-ui;max-width:1000px;margin:30px auto;padding:20px;background:#101820;color:#eee}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#1e2b36;padding:20px;border-radius:12px}</style>'
                     '<h1>EzVille Monitor</h1><p>HA 내부 로그 보관 · 매주 월요일 08:00 한국 시간</p>'
-                    '<p>수집 heartbeat는 실제 엘리베이터 도착을 보장하지 않습니다.</p><h2>주간 수집 현황</h2><pre>'
+                    '<p>수집 heartbeat는 실제 엘리베이터 도착을 보장하지 않습니다.</p>'
+                    + ('<p role="status">' + html.escape(message) + '</p>' if message else '')
+                    + ('<form method="post" action="daily/run"><input type="hidden" name="csrf" value="'
+                       + html.escape(csrf_token, quote=True) + '"><button type="submit">마지막 22:00 일일 보고 다시 실행 · 알림 재전송</button></form>'
+                       '<p>22:01:30 이후에 사용하세요. 버튼을 다시 누르면 휴대폰 알림도 재전송될 수 있습니다.</p>'
+                       if options and options.get('daily_enabled') else '')
+                    + '<h2>주간 수집 현황</h2><pre>'
                     + html.escape(json.dumps(result,ensure_ascii=False,indent=2)) + '</pre><h2>일일 보고</h2><pre>'
                     + html.escape(daily_text) + '</pre><h2>최근 분석</h2><pre>'
                     + html.escape(latest) + '</pre></html>').encode()
@@ -93,7 +133,7 @@ def handler(database, node):
                 self.send_header('Content-Length', str(len(body)))
                 self.send_header('Cache-Control', 'no-store')
                 self.send_header('X-Content-Type-Options', 'nosniff')
-                self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'")
+                self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'")
                 self.end_headers()
                 self.wfile.write(body)
             except (OSError, sqlite3.Error):
@@ -101,7 +141,7 @@ def handler(database, node):
     return Handler
 
 
-def serve(database, node):
-    server = ThreadingHTTPServer(('0.0.0.0', 8787), handler(database, node))
+def serve(database, node, options=None):
+    server = ThreadingHTTPServer(('0.0.0.0', 8787), handler(database, node, options))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
