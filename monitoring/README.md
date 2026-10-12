@@ -23,6 +23,33 @@ Delivery runs about 1–2 minutes after 22:00 so the final packet bucket can be 
 On first enablement, the monitor waits for the next 22:00 boundary rather than reporting
 an earlier period it did not fully observe.
 
+### Manual daily report (Monitor 0.6.1 candidate)
+
+The Monitor add-on's HA ingress panel has a **last 22:00 report: run again and resend**
+button when `daily_enabled` is on. The button sends a CSRF-protected POST to the ingress-only
+`/daily/run` route. It recalculates the most recent closed 22:00 KST window and requests the
+HA persistent notification and configured phone push again, even if that day's report was
+already saved. It is available from 22:01:30 KST onward. A newly enabled monitor can use
+the manual button, but its partial observation is marked incomplete. The scheduled job still
+waits for the first complete window. Repeated clicks within 60 seconds and concurrent runs
+are rejected; an interrupted run remains blocked until its status is inspected to avoid an
+unintentional second mobile push. A failed resend leaves an earlier successful report intact.
+
+For a separately authorized external trigger, set a distinct random 32+ character
+`remote_action_secret` in the masked add-on option. With `remote_enabled` and `daily_enabled`
+on, `POST /v1/daily/run` on the existing HTTPS tunnel accepts only `{}` signed with the
+`ezville-action-v1` HMAC envelope and this action key. Its response is signed with the same
+key. The ordinary `remote_secret` remains read-only and cannot trigger a report. Keep the
+action key out of URLs, chat, logs, PRs and the read-only automation. Omit the action key to
+disable the external action route. An example client verifies response signatures:
+
+```sh
+python monitoring/run_daily_remote.py --origin https://ezville-monitor.septimarron.space --key-file /private/monitor-action.key
+```
+
+`ran=true` means the HA API accepted the notification requests, not that a phone displayed
+the push. A manual rerun cannot fill collector gaps or reconstruct missing old packets.
+
 ### Passive packet discovery
 
 EzVille 0.0.14 profiles every checksum-valid incoming `F7` frame before device-specific
@@ -163,7 +190,9 @@ receive bounded redacted excerpts or reports temporarily for analysis.
   Clock tolerance is 60 seconds. Nonces are rejected on reuse while this API process runs;
   a server restart resets the nonce cache. Replayed reads cannot perform writes.
 - Responses are signed and marked no-store. No cookies, HA/Supervisor token or OTP is used.
-  No raw file paths, arbitrary SQL, commands, writes or restart routes are accepted.
+  The read key accepts no writes. The separately keyed manual report route only requests
+  HA notification delivery; no raw file paths, arbitrary SQL, device commands or restart
+  routes are accepted.
 - Threads, body sizes and request rate are bounded. Unknown routes/unsigned requests
   expose no telemetry. Disabling `remote_enabled` or removing the tunnel route revokes access.
 
