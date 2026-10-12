@@ -108,7 +108,7 @@ def summarize(database, node, start, end):
                             raise ValueError('invalid variants')
                         for fingerprint, amount in variants.items():
                             amount = int(amount)
-                            if not re.fullmatch(r'[0-9a-f]{64}', fingerprint) or amount < 0:
+                            if not re.fullmatch(r'[0-9a-f]{32}', fingerprint) or amount < 0:
                                 raise ValueError('invalid variant')
                             tracked = entry['tracked_variants']
                             if fingerprint in tracked:
