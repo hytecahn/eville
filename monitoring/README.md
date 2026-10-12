@@ -1,13 +1,14 @@
 # HAOS-local EzVille weekly maintenance
 
 The NUC keeps HAOS. EzVille Monitor reads existing `/share` diagnostic files and stores
-redacted batches/cursors in its persistent `/data/telemetry.sqlite`. No external log server,
-Linux host, remote monitor hostname, long-lived HA token, or OTP automation is required.
+redacted batches/cursors in its persistent `/data/telemetry.sqlite`. No external log storage server, Linux host, long-lived HA token or OTP automation is required.
+An optional monitor hostname is needed for independent external read access.
 
 The collector snapshots Supervisor Core/add-on info every 60 seconds using the **default**
 info-only role. It never sends device commands, restarts apps, or changes HA settings.
 The ingress dashboard is authenticated by HA and only accepts the Supervisor ingress peer.
-No host port is published; Cloudflare configuration is unchanged.
+No host port is published. Independent external read access uses a separate internal
+listener (8788) routed through a specifically configured HTTPS tunnel hostname.
 
 ## Weekly job
 
@@ -73,3 +74,65 @@ and behavior as well as CI success. The AI's causality judgment alone is not a s
 GitHub monitor CI runs these tests and an actual Docker build. Existing EzVille resilience CI
 validates proposed runtime changes. No real OpenAI call, billable analysis, GitHub bot token or
 live physical device test is included in local tests.
+
+## Independent remote reads (0.3.0)
+
+This path is independent of the HA login session, OTP, OpenAI API credentials and GitHub
+credentials. It is opt-in and **read only**. Original logs/database remain on HA; clients
+receive bounded redacted excerpts or reports temporarily for analysis.
+
+- `/v1/health`: collector freshness, stored batch/log-line counts and latest observed versions.
+- `/v1/report`: seven-day bounded report, at most 30 redacted error examples.
+- `/v1/recent`: at most 30 recent redacted log lines, scans at most the last 100 batches.
+- All data requests require POST with HMAC-SHA256 over method/path/time/nonce/body.
+  Clock tolerance is 60 seconds. Nonces are rejected on reuse while this API process runs;
+  a server restart resets the nonce cache. Replayed reads cannot perform writes.
+- Responses are signed and marked no-store. No cookies, HA/Supervisor token or OTP is used.
+  No raw file paths, arbitrary SQL, commands, writes or restart routes are accepted.
+- Threads, body sizes and request rate are bounded. Unknown routes/unsigned requests
+  expose no telemetry. Disabling `remote_enabled` or removing the tunnel route revokes access.
+
+### One-time administrative installation
+
+1. Update the monitor to 0.3.0. Account owner enters a random 32+ character
+   `remote_secret` in the masked option; keep the matching key in an external secret store
+   or a private local file (0600). Do not send it in chat, commit it or put it in URLs.
+2. Enable `remote_enabled`, save and restart the monitor. It binds 8788 **inside** the
+   container; it does not publish a LAN/host port or change Supervisor permissions.
+3. Inspect the existing Cloudflared configuration first. For a locally managed tunnel,
+   preserve all existing hosts and append:
+   ```yaml
+   additional_hosts:
+     # Preserve all existing entries above this new entry.
+     - hostname: ezville-monitor.septimarron.space
+       service: http://8a83e751-ezville-monitor:8788
+   ```
+   The installed monitor container hostname must be verified before applying this value.
+   Restart Cloudflared only after monitoring itself is ready; the restart can briefly
+   interrupt remote HA access. For a remotely managed tunnel (`tunnel_token`), add this
+   hostname/service in Cloudflare's dashboard; app-side additional_hosts are ignored.
+   Do not remove the existing HA hostname or weaken HA's OTP protection.
+4. The initial installation and tunnel setup require an authenticated administrator once.
+   Subsequent **API reads** require only the monitor key, no HA login.
+5. Configure a runner/client with the HTTPS origin and the key. This ChatGPT conversation
+   does not provide a durable per-project secret vault: the key must be available to the
+   execution environment or supplied through an approved external secret store. Installing
+   the server alone does not give future conversations possession of that key.
+
+### Acceptance test through the deployed HTTPS route
+
+```sh
+python monitoring/read_remote.py health --origin https://ezville-monitor.septimarron.space --key-file /private/monitor.key
+python monitoring/read_remote.py recent --origin https://ezville-monitor.septimarron.space --key-file /private/monitor.key
+```
+
+The client has no HA auth code or cookie support. Check unsigned requests return no report.
+Compare health snapshots over time: growing `batch_count` proves persisted collection
+cycles; growing `log_line_count` or a new known source line proves **new log ingestion**.
+Heartbeats alone are not new device log lines. Then restart only the monitor and repeat:
+stored counts/cursors must survive and continue increasing without duplicated old log lines.
+
+Local HTTP integration tests simulate a real source file append, independent authenticated
+reads, heartbeat-only cycles, server/database restart and authentication failures. They are
+not a substitute for testing the deployed HTTPS tunnel. Until the admin connection and
+external key provisioning complete, mark the remote route **implemented, not operational**.

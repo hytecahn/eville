@@ -90,6 +90,15 @@ def main():
     from maintenance import initialize as initialize_weekly
     initialize_weekly(db)
     server = serve(database, options['node_id'])
+    remote_server = None
+    if options.get('remote_enabled'):
+        from remote_api import serve as serve_remote
+        try:
+            remote_server = serve_remote(database, options['node_id'], options.get('remote_secret', ''))
+            print('remote API active on internal port 8788', flush=True)
+        except (ValueError, OSError) as error:
+            # Fail closed for remote reads while preserving local collection.
+            print('remote API not started: ' + type(error).__name__ + '; check remote_secret/listener configuration', flush=True)
     stop = threading.Event()
     from maintenance import worker
     threading.Thread(target=worker, args=(database, options, stop), daemon=True).start()
@@ -105,6 +114,9 @@ def main():
         except Exception as error:
             print('collection: {}'.format(type(error).__name__), flush=True)
         stop.wait(1 if full else options['poll_seconds'])
+    if remote_server:
+        remote_server.shutdown()
+        remote_server.server_close()
     server.shutdown()
     server.server_close()
     db.close()

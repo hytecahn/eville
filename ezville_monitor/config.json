@@ -1,6 +1,6 @@
 {
   "name": "EzVille Monitor",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "slug": "ezville_monitor",
   "description": "HA-local log archive, Monday 08:00 KST analysis and draft maintenance PRs",
   "arch": [
@@ -23,7 +23,8 @@
     "max_storage_mb": 256,
     "weekly_enabled": false,
     "publish_pr": false,
-    "ai_model": "gpt-5.4"
+    "ai_model": "gpt-5.4",
+    "remote_enabled": false
   },
   "schema": {
     "log_path": "str",
@@ -36,7 +37,9 @@
     "publish_pr": "bool",
     "openai_api_key": "password?",
     "github_token": "password?",
-    "ai_model": "str"
+    "ai_model": "str",
+    "remote_enabled": "bool",
+    "remote_secret": "password?"
   },
   "ingress": true,
   "ingress_port": 8787,
