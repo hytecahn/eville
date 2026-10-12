@@ -1,0 +1,46 @@
+{
+  "name": "EzVille Monitor",
+  "version": "0.2.0",
+  "slug": "ezville_monitor",
+  "description": "HA-local log archive, Monday 08:00 KST analysis and draft maintenance PRs",
+  "arch": [
+    "aarch64",
+    "amd64"
+  ],
+  "startup": "application",
+  "boot": "auto",
+  "map": [
+    "share:ro"
+  ],
+  "hassio_api": true,
+  "hassio_role": "default",
+  "options": {
+    "log_path": "/share/simple_mqtt_ezville_control.log",
+    "node_id": "home",
+    "target_slug": "",
+    "poll_seconds": 60,
+    "retention_days": 30,
+    "max_storage_mb": 256,
+    "weekly_enabled": false,
+    "publish_pr": false,
+    "openai_api_key": "",
+    "github_token": "",
+    "ai_model": "gpt-5.4"
+  },
+  "schema": {
+    "log_path": "str",
+    "node_id": "str",
+    "target_slug": "str",
+    "poll_seconds": "int(10,60)",
+    "retention_days": "int(7,90)",
+    "max_storage_mb": "int(32,1024)",
+    "weekly_enabled": "bool",
+    "publish_pr": "bool",
+    "openai_api_key": "password",
+    "github_token": "password",
+    "ai_model": "str"
+  },
+  "ingress": true,
+  "ingress_port": 8787,
+  "panel_icon": "mdi:heart-pulse"
+}
