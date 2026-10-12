@@ -99,7 +99,7 @@ def main():
     if options.get('remote_enabled'):
         from remote_api import serve as serve_remote
         try:
-            remote_server = serve_remote(database, options['node_id'], options.get('remote_secret', ''))
+            remote_server = serve_remote(database, options['node_id'], options.get('remote_secret', ''), options)
             print('remote API active on internal port 8788', flush=True)
         except (ValueError, OSError) as error:
             # Fail closed for remote reads while preserving local collection.

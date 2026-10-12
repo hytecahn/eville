@@ -43,7 +43,7 @@ def query(origin, key, endpoint, payload=None):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('endpoint',choices=['health','report','recent'])
+    p.add_argument('endpoint',choices=['health','report','recent','daily'])
     p.add_argument('--origin',required=True)
     p.add_argument('--key-file',type=Path)
     p.add_argument('--check',action='store_true',help='Return freshness exit status without exposing telemetry in CI logs')

@@ -14,7 +14,51 @@ from protocol import redact
 
 MAX_REQUEST = 1024
 MAX_RESPONSE = 262144
-PATHS = {'/v1/health', '/v1/report', '/v1/recent'}
+PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily'}
+
+
+def daily_snapshot(database, node, options, now):
+    """Read daily delivery state and passive discovery evidence, without raw frames."""
+    from daily import window, summarize
+    day, start, end = window(now)
+    with closing(sqlite3.connect('file:' + str(database) + '?mode=ro', uri=True)) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        state = dict(db.execute('SELECT key,value FROM daily_state')) if 'daily_state' in tables else {}
+        row = db.execute('SELECT day,status,attempted,body FROM daily_reports ORDER BY day DESC LIMIT 1').fetchone() if 'daily_reports' in tables else None
+    saved = bool(row and row[0] == day and row[1] == 'done')
+    summary = json.loads(row[3]) if saved else summarize(database, node, start, end)
+    totals = {'packet_patterns': len(summary['packet_patterns']),
+              'packet_markers': len(summary['packet_markers']), 'calls': len(summary['calls'])}
+    new = set(summary['new_packet_patterns'])
+    summary['packet_patterns'] = sorted(summary['packet_patterns'], key=lambda item:
+        (item['signature'] not in new, item['known'], -item['count']))[:128]
+    summary['new_packet_patterns'] = [item['signature'] for item in summary['packet_patterns'] if item['signature'] in new]
+    summary['packet_markers'] = summary['packet_markers'][-20:]
+    summary['calls'] = summary['calls'][-30:]
+    # Raw bus addresses/payloads stay inside HA. Fingerprints and lengths let a
+    # reviewer compare variants without treating log content as instructions.
+    for item in summary['packet_patterns']:
+        samples = item.pop('samples')
+        item['sample_fingerprints'] = [hashlib.sha256(sample.encode()).hexdigest() for sample in samples]
+        item['sample_byte_lengths'] = [len(sample) // 2 for sample in samples
+                                      if re.fullmatch(r'(?:[0-9A-F]{2})+', sample)]
+    for marker in summary['packet_markers']:
+        marker['label'] = redact(str(marker['label']))[:80]
+        for candidate in marker['candidates']:
+            candidate.pop('sample', None)
+    for call in summary['calls']:
+        call.pop('request_id', None)
+    return {'node': node, 'monitor_version': '0.5.0', 'window_day': day,
+            'daily_enabled': bool(options.get('daily_enabled')) if options is not None else None,
+            'mobile_notification_configured': bool(options.get('daily_notify_service')) if options is not None else None,
+            'enabled_since': state.get('enabled_since'),
+            'latest_delivery': None if row is None else {'day': row[0], 'status': row[1], 'attempted_at': row[2]},
+            'delivery_due_at': end + 90, 'summary_source': 'saved_report' if saved else 'preview',
+            'summary': summary, 'totals_before_limits': totals,
+            'truncated': any(totals[key] > len(summary[key]) for key in totals),
+            'limitations': ['Unknown signatures and marker correlations are hypotheses, not verified device meanings.',
+                            'Raw packet samples remain in HA; fingerprints cannot reconstruct payloads.',
+                            'Delivery status done means configured HA API calls returned successfully, not that a phone displayed the push.']}
 
 
 def sign(secret, method, path, timestamp, nonce, body):
@@ -92,7 +136,7 @@ class LimitedServer(ThreadingHTTPServer):
             self.slots.release()
 
 
-def handler(database, node, secret):
+def handler(database, node, secret, options=None):
     guard = Guard()
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -146,6 +190,8 @@ def handler(database, node, secret):
                     if type(limit) is not int or not 1 <= limit <= 30:
                         return self.reply(400, {}, nonce)
                     result = {'node': node, 'events': recent(database, node, limit)}
+                elif self.path == '/v1/daily':
+                    result = daily_snapshot(database, node, options, now)
                 else:
                     result = snapshot(database, node, now)
                     if self.path == '/v1/health':
@@ -161,9 +207,9 @@ def handler(database, node, secret):
     return Handler
 
 
-def serve(database, node, secret):
+def serve(database, node, secret, options=None):
     if len(secret) < 32:
         raise ValueError('remote_secret must contain at least 32 characters')
-    server = LimitedServer(('0.0.0.0', 8788), handler(database, node, secret))
+    server = LimitedServer(('0.0.0.0', 8788), handler(database, node, secret, options))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
