@@ -8,6 +8,7 @@
   - **엘리베이터 도착 알림**: MQTT 토픽 `ezville/elevator/arrival`으로 도착 패킷 발행
   - **Addon 먹통 감지 및 자동 리셋**: 5분 이상 응답이 없거나 MQTT 재연결이 2분 이상 실패하면 자동으로 복구
   - **영구 진단 로그**: `/share/simple_mqtt_ezville_control.log`에 장애, traceback 및 10분 주기 상태를 90일간 보관
+  - **수신 패킷 통계**: 체크섬을 통과한 F7 프레임의 5분 단위 유형·횟수와 제한된 원문 예시를 별도 32 MiB 순환 파일에 저장. 벨/문열림 실험 표식은 `../monitoring/README.md` 참조
 
 ## 2. 설치 방법
 

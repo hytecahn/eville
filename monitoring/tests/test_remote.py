@@ -138,6 +138,16 @@ class RemoteTests(unittest.TestCase):
         self.assertNotIn('privatevalue',result)
         self.assertNotIn('192.168.0.167',result)
 
+    def test_packet_samples_never_leave_remote_recent_api(self):
+        with self.log.open('a') as stream:
+            stream.write('[PACKET_PROFILE] {"samples":["F799010200AABB"]}\n')
+            stream.write('[SIGNAL] receved: F799010200AABB\n')
+            stream.write('[INFO] status is available\n')
+        self.collect()
+        response=json.dumps(self.read('/v1/recent',{'limit':30}))
+        self.assertNotIn('F799010200AABB',response)
+        self.assertIn('status is available',response)
+
     def test_production_client_validates_signed_response_without_ha_auth(self):
         local_opener=urllib.request.build_opener()
         server_origin=self.url

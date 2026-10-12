@@ -61,6 +61,8 @@ def recent(database, node, limit=20):
         for collected, body in rows:
             for event in reversed(json.loads(body)['events']):
                 if event['kind'] == 'log':
+                    if any(tag in event['text'] for tag in ('[PACKET_WINDOW]', '[PACKET_PROFILE]', '[PACKET_TRACE]', '[PACKET_MARK]', '[PACKET_OVERFLOW]', '[SIGNAL]')):
+                        continue  # Raw bus frames stay inside HA, even for an authenticated remote reader.
                     events.append({'collected_at': collected, 'source': event['source'], 'text': redact(event['text']).encode()[:4096].decode('utf-8',errors='ignore')})
                     if len(events) >= limit:
                         return events

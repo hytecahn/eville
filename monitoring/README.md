@@ -5,10 +5,78 @@ redacted batches/cursors in its persistent `/data/telemetry.sqlite`. No external
 An optional monitor hostname is needed for independent external read access.
 
 The collector snapshots Supervisor Core/add-on info every 60 seconds using the **default**
-info-only role. It never sends device commands, restarts apps, or changes HA settings.
+Supervisor role. The optional daily job uses the separate Home Assistant API proxy to
+create notifications; it never sends device commands, restarts apps, or changes HA settings.
 The ingress dashboard is authenticated by HA and only accepts the Supervisor ingress peer.
 No host port is published. Independent external read access uses a separate internal
 listener (8788) routed through a specifically configured HTTPS tunnel hostname.
+
+## Daily EW11 report (optional)
+
+Enable `daily_enabled` in EzVille Monitor to create a Home Assistant persistent notification
+at 22:00 Asia/Seoul. It summarizes the **previous 24 hours** (yesterday 22:00 to today
+22:00), not the incomplete calendar day. The full report is also shown on the HA-authenticated
+monitor dashboard. For phone push, set `daily_notify_service` to the exact
+`notify.mobile_app_<device>` action registered by the HA Companion App; leave it empty for
+HA-only notifications. No report is sent to an external analytics provider.
+Delivery runs about 1–2 minutes after 22:00 so the final packet bucket can be collected.
+On first enablement, the monitor waits for the next 22:00 boundary rather than reporting
+an earlier period it did not fully observe.
+
+### Passive packet discovery
+
+EzVille 0.0.14 profiles every checksum-valid incoming `F7` frame before device-specific
+parsing. Every five minutes it writes exact counts, a structural signature
+(`device:address:command:length`), known/unclassified status and up to three raw samples
+per signature. A separate `/share/simple_mqtt_ezville_control.log.packet.log` rotates at
+8 MiB with three backups (32 MiB maximum). More than 256 signatures in a bucket produces
+an explicit overflow count. Other framing, checksum failures and traffic that never
+reaches EW11 cannot be classified as valid frames. Ordinary polling is counted rather
+than logged line by line. Light and thermostat state changes are observed state changes,
+not necessarily physical button presses.
+
+The daily report lists packet counts by device ID, light/thermostat state changes, new
+signatures and unclassified signatures. The first day builds a baseline. Raw packet
+samples remain on HA in the authenticated monitor dashboard and are excluded from
+phone notifications and the public remote recent-logs endpoint. Protect HA backups
+containing `/share` or `/data` accordingly.
+
+To study a wallpad button, mark the experiment in HA **Settings > Tools > Actions**:
+
+```yaml
+action: mqtt.publish
+data:
+  topic: ezville/packet/mark
+  payload: bell  # or door_open, other
+  retain: false
+```
+
+Within 15 seconds press the physical button once. Repeat with and without the press.
+The add-on retains at most 300 verified frames from five seconds before and fifteen
+seconds after each marker, at most one marker per minute. The report lists candidate
+signatures more frequent after the marker, with HA-only raw examples. These are
+correlations to investigate, not established meanings. The marker never sends an
+RS485 command; do not replay candidate frames onto the bus.
+
+Update the EzVille runtime to 0.0.14 and the Monitor to 0.4.0 before relying on call
+timings. New runtime lines have a machine-readable epoch timestamp; commands record a
+single `elevator_call_sent` event when the first send is accepted locally, and the
+existing arrival packet records an `elevator_arrival_signal` event. Retries do not count
+as extra calls. The packet contains no request ID, so a signal is paired **only** if
+exactly one call remains within 15 minutes. Even then elapsed time is an estimate,
+not proof that the requested elevator arrived at the user's floor. Multiple outstanding
+calls, missing signals and pre-upgrade lines are unconfirmed or incomplete.
+The report separates EW11 reset attempts, completed resets, communication session
+restarts and watchdog worker restarts. Error and timeout counts describe log lines,
+not independent root causes. Collection gaps and historical logs without reliable event
+timestamps mark the report incomplete; zeros then mean only "none observed".
+
+Enabling `homeassistant_api` in the Monitor allows it to create notifications through the
+Supervisor Core API proxy, a broader capability than its earlier info-only Supervisor
+queries. This code sends only a fixed notification action and optionally one validated
+mobile notification action. Daily reports remain on HA in `/data/telemetry.sqlite` and
+are not returned by the public read-only API. A failed delivery is retried after an hour;
+interrupted `running` reports need manual inspection to avoid duplicate phone pushes.
 
 ## Weekly job
 

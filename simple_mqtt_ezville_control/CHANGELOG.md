@@ -1,5 +1,13 @@
 수정 사항 Changelog
 
+## 0.0.14
+
+- Add epoch timestamps to diagnostic and watchdog logs for accurate daily KST reporting.
+- Record one elevator call event on the first accepted local send and one arrival signal event on the verified arrival packet. Retries do not create extra call events.
+- Arrival packets have no call ID. Daily elapsed times remain explicitly estimated and concurrent calls remain unmatched.
+- Profile checksum-valid incoming F7 frames into bounded five-minute signatures and sample records, including unknown device/command combinations, without changing packet transmission.
+- Add an MQTT experiment marker for bell/door-open discovery with bounded local frame samples five seconds before and fifteen seconds after a marker.
+
 ## 0.0.13
 
 - `MQTT_LOG`를 켠 경우에도 Paho의 고빈도 `Received PUBLISH`/`Sending PUBLISH` wire trace는 기록하지 않아 EW11 정상 트래픽으로 로그가 폭증하지 않도록 했습니다.

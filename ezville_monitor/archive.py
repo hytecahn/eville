@@ -69,14 +69,24 @@ def handler(database, node):
                 with closing(sqlite3.connect(database)) as db:
                     initialize(db)
                     from maintenance import initialize as initialize_weekly
+                    from daily import initialize as initialize_daily, render as render_daily
                     initialize_weekly(db)
+                    initialize_daily(db)
                     row = db.execute('SELECT week,status,body FROM weekly_runs ORDER BY week DESC LIMIT 1').fetchone()
+                    day_row = db.execute('SELECT day,status,body FROM daily_reports ORDER BY day DESC LIMIT 1').fetchone()
                 latest = 'No weekly analysis yet.' if row is None else row[0] + ' (' + row[1] + ')\n' + json.dumps(json.loads(row[2]), ensure_ascii=False, indent=2)
+                if day_row is None:
+                    daily_text = 'No daily report yet.'
+                elif day_row[1] == 'done':
+                    daily_text = day_row[0] + '\n' + render_daily(json.loads(day_row[2]), max_calls=None, raw_samples=True)
+                else:
+                    daily_text = day_row[0] + ' (' + day_row[1] + ')'
                 body = ('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
                     '<title>EzVille Monitor</title><style>body{font:16px system-ui;max-width:1000px;margin:30px auto;padding:20px;background:#101820;color:#eee}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#1e2b36;padding:20px;border-radius:12px}</style>'
                     '<h1>EzVille Monitor</h1><p>HA 내부 로그 보관 · 매주 월요일 08:00 한국 시간</p>'
                     '<p>수집 heartbeat는 실제 엘리베이터 도착을 보장하지 않습니다.</p><h2>주간 수집 현황</h2><pre>'
-                    + html.escape(json.dumps(result,ensure_ascii=False,indent=2)) + '</pre><h2>최근 분석</h2><pre>'
+                    + html.escape(json.dumps(result,ensure_ascii=False,indent=2)) + '</pre><h2>일일 보고</h2><pre>'
+                    + html.escape(daily_text) + '</pre><h2>최근 분석</h2><pre>'
                     + html.escape(latest) + '</pre></html>').encode()
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')

@@ -1,6 +1,6 @@
 {
   "name": "EzVille Monitor",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "slug": "ezville_monitor",
   "description": "HA-local log archive, Monday 08:00 KST analysis and draft maintenance PRs",
   "arch": [
@@ -13,6 +13,7 @@
     "share:ro"
   ],
   "hassio_api": true,
+  "homeassistant_api": true,
   "hassio_role": "default",
   "options": {
     "log_path": "/share/simple_mqtt_ezville_control.log",
@@ -24,7 +25,9 @@
     "weekly_enabled": false,
     "publish_pr": false,
     "ai_model": "gpt-5.4",
-    "remote_enabled": false
+    "remote_enabled": false,
+    "daily_enabled": false,
+    "daily_notify_service": ""
   },
   "schema": {
     "log_path": "str",
@@ -39,7 +42,9 @@
     "github_token": "password?",
     "ai_model": "str",
     "remote_enabled": "bool",
-    "remote_secret": "password?"
+    "remote_secret": "password?",
+    "daily_enabled": "bool",
+    "daily_notify_service": "str?"
   },
   "ingress": true,
   "ingress_port": 8787,

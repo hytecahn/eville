@@ -89,6 +89,11 @@ def main():
     initialize(db)
     from maintenance import initialize as initialize_weekly
     initialize_weekly(db)
+    if not options.get('daily_enabled'):
+        from daily import initialize as initialize_daily
+        initialize_daily(db)
+        db.execute("DELETE FROM daily_state WHERE key='enabled_since'")
+        db.commit()
     server = serve(database, options['node_id'])
     remote_server = None
     if options.get('remote_enabled'):

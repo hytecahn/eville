@@ -96,7 +96,7 @@ def main():
     path = config.get('diagnostic_log_file', '/share/simple_mqtt_ezville_control.log') + '.watchdog.log'
     logger = logging.getLogger('watchdog')
     logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s %(message)s')
+    formatter = logging.Formatter('%(asctime)s [epoch_s=%(created)f] %(message)s')
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         handler = RotatingFileHandler(path, maxBytes=1024 * 1024, backupCount=3, encoding='utf-8')
