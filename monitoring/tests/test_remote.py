@@ -1,5 +1,7 @@
 import json
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import sys
@@ -17,6 +19,7 @@ import remote_api
 import daily
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import read_remote
+import run_daily_remote
 
 
 class RemoteTests(unittest.TestCase):
@@ -36,8 +39,8 @@ class RemoteTests(unittest.TestCase):
         collector.collect(self.db,str(self.log),'home',time.time(),status={'addon':{'state':'started','version':'0.0.13'}})
         archive.persist(self.db)
 
-    def start(self):
-        self.server=remote_api.LimitedServer(('127.0.0.1',0),remote_api.handler(self.database,'home',self.secret))
+    def start(self, options=None):
+        self.server=remote_api.LimitedServer(('127.0.0.1',0),remote_api.handler(self.database,'home',self.secret,options))
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
         self.thread.start()
         self.url='http://127.0.0.1:'+str(self.server.server_port)
@@ -210,6 +213,78 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(self.status(request), 401)
         request, _ = self.request('/v1/daily', {'daily_enabled': True})
         self.assertEqual(self.status(request), 400)
+
+    def test_manual_action_uses_separate_key_and_rejects_replay(self):
+        self.stop()
+        action_key = 'a' * 64
+        self.start({'daily_enabled': True, 'node_id': 'home', 'remote_action_secret': action_key})
+        path = remote_api.ACTION_PATH
+        read_request, _ = self.request(path)
+        self.assertEqual(self.status(read_request), 401)
+        self.assertNotIn(path, read_remote.PATHS)
+        stamp, nonce, body = str(int(time.time())), secrets.token_hex(16), b'{}'
+        headers = {'Content-Type': 'application/json', 'X-Ezville-Time': stamp, 'X-Ezville-Nonce': nonce,
+                   'X-Ezville-Signature': remote_api.sign_action(action_key, 'POST', path, stamp, nonce, body)}
+        request = urllib.request.Request(self.url + path, body, headers=headers)
+        with patch.dict('os.environ', {'SUPERVISOR_TOKEN': 'test'}), patch.object(daily, 'run_daily', return_value=True) as run:
+            with urllib.request.urlopen(request) as response:
+                result = json.loads(response.read())
+                self.assertTrue(result['ran'])
+            self.assertEqual(self.status(request), 401)
+            run.assert_called_once()
+            self.assertTrue(run.call_args.kwargs['force'])
+
+    def test_manual_action_is_disabled_if_action_key_equals_read_key(self):
+        self.stop()
+        self.start({'daily_enabled': True, 'node_id': 'home', 'remote_action_secret': self.secret})
+        request, _ = self.request(remote_api.ACTION_PATH)
+        self.assertEqual(self.status(request), 404)
+
+    def test_manual_action_client_verifies_signed_response(self):
+        self.stop()
+        action_key = 'a' * 64
+        self.start({'daily_enabled': True, 'node_id': 'home', 'remote_action_secret': action_key})
+        local_opener = urllib.request.build_opener()
+        server_origin = self.url
+        class Proxy:
+            def open(self, request, timeout):
+                request.full_url = server_origin + urllib.parse.urlsplit(request.full_url).path
+                return local_opener.open(request, timeout=timeout)
+        with patch.dict('os.environ', {'SUPERVISOR_TOKEN': 'test'}), patch.object(daily, 'run_daily', return_value=True), \
+             patch.object(run_daily_remote.urllib.request, 'build_opener', return_value=Proxy()):
+            status, result = run_daily_remote.run('https://monitor.example.test', action_key)
+        self.assertEqual(status, 200)
+        self.assertTrue(result['ran'])
+        with self.assertRaises(ValueError):
+            run_daily_remote.run('http://monitor.example.test', action_key)
+
+    def test_ha_ingress_button_requires_csrf_and_runs_manual_report(self):
+        options = {'daily_enabled': True, 'node_id': 'home'}
+        handler = archive.handler(self.database, 'home', options)
+        handler.allowed = lambda self: True  # Simulate the Supervisor ingress peer.
+        server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = 'http://127.0.0.1:' + str(server.server_port)
+        try:
+            with urllib.request.urlopen(url + '/') as response:
+                page = response.read().decode()
+                self.assertIn('action="daily/run"', page)
+                token = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
+            wrong = urllib.request.Request(url + '/daily/run', b'csrf=wrong',
+                headers={'Content-Type': 'application/x-www-form-urlencoded'})
+            self.assertEqual(self.status(wrong), 403)
+            request = urllib.request.Request(url + '/daily/run', ('csrf=' + token).encode(),
+                headers={'Content-Type': 'application/x-www-form-urlencoded'})
+            with patch.dict('os.environ', {'SUPERVISOR_TOKEN': 'test'}), patch.object(daily, 'run_daily', return_value=True) as run:
+                with urllib.request.urlopen(request) as response:
+                    self.assertIn('다시 생성', response.read().decode())
+                run.assert_called_once()
+                self.assertTrue(run.call_args.kwargs['force'])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_daily_limits_discovery_and_reports_coverage(self):
         now = time.time()
