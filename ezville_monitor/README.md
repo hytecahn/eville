@@ -1,4 +1,4 @@
-# EzVille Monitor 0.2.0
+# EzVille Monitor 0.2.1
 
 HAOS-local log collection and Monday 08:00 KST maintenance analysis.
 
