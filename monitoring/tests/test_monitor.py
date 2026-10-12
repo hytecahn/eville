@@ -18,9 +18,8 @@ sys.path.insert(0, str(ROOT / 'ezville_monitor'))
 sys.path.insert(0, str(ROOT / 'monitoring'))
 import collector
 import protocol
-import receiver
-import weekly
-import health
+import archive
+import maintenance
 
 
 class MonitorTests(unittest.TestCase):
@@ -103,101 +102,12 @@ class MonitorTests(unittest.TestCase):
         self.assertFalse(protocol.authenticated('secret', '1000', body, signed, 1301))
         self.assertFalse(protocol.authenticated('secret', None, body, signed, 1000))
 
-    def test_duplicate_ack_and_report_gaps(self):
-        self.log.write_text('[ERROR] failure\n')
-        batch = self.collect()
-        database = self.root / 'received.sqlite'
-        with receiver.connect(database) as db:
-            for _ in range(2):
-                self.assertEqual(receiver.accept(db, protocol.encode(batch), 1000), batch['id'])
-            self.assertEqual(db.execute('SELECT count(*) FROM batches').fetchone()[0], 1)
-        result = weekly.report(database, 'home', 1100)
-        self.assertEqual(result['counts']['error'], 1)
-        self.assertFalse(result['observation_complete'])
-
-    def test_complete_short_window(self):
-        self.log.write_text('ok\n')
-        database = self.root / 'received.sqlite'
-        with receiver.connect(database) as db:
-            for now in range(1000, 1601, 60):
-                receiver.accept(db, protocol.encode(self.collect(now)), now)
-        result = weekly.report(database, 'home', 1600, days=600/86400)
-        self.assertTrue(result['observation_complete'])
-
-    def test_patch_rejects_commands_and_workflow_changes(self):
-        for filename in ['.github/workflows/publish.yml', 'simple_mqtt_ezville_control/config.json', '../escape']:
-            with self.assertRaises(ValueError):
-                weekly.validate_patch(self.root, 'diff --git a/{0} b/{0}\n'.format(filename))
-
-    def test_failed_delivery_keeps_outbox(self):
-        self.log.write_text('one\n')
-        self.collect()
-        with self.assertRaises(ValueError):
-            collector.send_pending(self.db, 'http://insecure/ingest', 'secret')
-        self.assertEqual(self.db.execute('SELECT count(*) FROM outbox').fetchone()[0], 1)
-
-    def test_http_authenticated_ingest(self):
-        secret = 's' * 32
-        server = receiver.ThreadingHTTPServer(('127.0.0.1', 0), receiver.handler(self.root / 'received.sqlite', secret))
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            self.log.write_text('one\n')
-            body = protocol.encode(self.collect(time.time()))
-            timestamp = str(int(time.time()))
-            url = 'http://127.0.0.1:{}/ingest'.format(server.server_port)
-            request = urllib.request.Request(url, body, headers={'X-Ezville-Time': timestamp,
-                                             'X-Ezville-Signature': protocol.signature(secret, timestamp, body)})
-            with urllib.request.urlopen(request) as result:
-                self.assertIn('accepted', json.load(result))
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                urllib.request.urlopen(urllib.request.Request(url, body))
-            self.assertEqual(error.exception.code, 401)
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
-
-    def test_stale_stream_is_detected_externally(self):
-        self.log.write_text('one\n')
-        database = self.root / 'received.sqlite'
-        with receiver.connect(database) as db:
-            receiver.accept(db, protocol.encode(self.collect()), 1000)
-        self.assertEqual(health.check(database, 'home', 1200)['status'], 'stale')
-        self.assertEqual(health.check(database, 'other', 1200)['status'], 'unknown')
-
-    def test_batch_id_collision_is_not_acknowledged(self):
-        batch = self.collect()
-        with receiver.connect(self.root / 'received.sqlite') as db:
-            receiver.accept(db, protocol.encode(batch), 1000)
-            batch['node'] = 'changed'
-            with self.assertRaises(ValueError):
-                receiver.accept(db, protocol.encode(batch), 1000)
-
-    def test_future_collection_rejected(self):
-        with receiver.connect(self.root / 'received.sqlite') as db:
-            with self.assertRaises(ValueError):
-                receiver.accept(db, protocol.encode(self.collect(2000)), 1000)
-
     def test_supervisor_unavailable_not_healthy(self):
         with patch('urllib.request.urlopen', side_effect=OSError):
             result = collector.supervisor_status('installed_slug', 'private-token')
         self.assertEqual(result['core']['observation'], 'unavailable')
         self.assertNotIn('private-token', json.dumps(result))
 
-    def test_patch_application_allowed_source_only(self):
-        import subprocess
-        repo = self.root / 'repo'
-        source = repo / 'simple_mqtt_ezville_control/ezville.py'
-        source.parent.mkdir(parents=True)
-        source.write_text('value = 1\n')
-        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-        subprocess.run(['git', 'add', '.'], cwd=repo, check=True)
-        subprocess.run(['git', '-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base'], cwd=repo, check=True)
-        filename = 'simple_mqtt_ezville_control/ezville.py'
-        diff = 'diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n@@ -1 +1 @@\n-value = 1\n+value = 2\n'.format(filename)
-        weekly.validate_patch(repo, diff)
-        self.assertEqual(source.read_text(), 'value = 2\n')
 
 
 if __name__ == '__main__':

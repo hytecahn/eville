@@ -1,9 +1,0 @@
-[Unit]
-Description=EzVille weekly analysis at Monday 08:00 Korea time
-[Timer]
-OnCalendar=Mon *-*-* 08:00:00 Asia/Seoul
-Persistent=true
-AccuracySec=1s
-Unit=ezville-weekly.service
-[Install]
-WantedBy=timers.target

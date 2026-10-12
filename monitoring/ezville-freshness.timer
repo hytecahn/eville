@@ -1,8 +1,0 @@
-[Unit]
-Description=Check EzVille telemetry freshness every minute
-[Timer]
-OnBootSec=60s
-OnUnitActiveSec=60s
-Unit=ezville-freshness.service
-[Install]
-WantedBy=timers.target

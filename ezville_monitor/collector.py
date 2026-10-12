@@ -1,4 +1,4 @@
-"""Persist log cursors and a bounded outbox before sending over HTTPS."""
+"""Persist cursors and telemetry in HA-local storage."""
 import glob
 import json
 import os
@@ -81,44 +81,33 @@ def supervisor_status(slug, token):
     return result
 
 
-def send_pending(db, url, secret):
-    if not url.startswith('https://'):
-        raise ValueError('receiver_url must use HTTPS')
-    opener = urllib.request.build_opener(NoRedirect())
-    for batch_id, body in db.execute('SELECT id,body FROM outbox ORDER BY rowid LIMIT 50').fetchall():
-        timestamp = str(int(time.time()))
-        request = urllib.request.Request(url, body, headers={
-            'Content-Type': 'application/json', 'X-Ezville-Time': timestamp,
-            'X-Ezville-Signature': signature(secret, timestamp, body)})
-        with opener.open(request, timeout=15) as response:
-            ack = json.loads(response.read(4096))
-            if response.status != 200 or ack.get('accepted') != batch_id:
-                raise RuntimeError('receiver did not acknowledge batch')
-        with db:
-            db.execute('DELETE FROM outbox WHERE id=?', (batch_id,))
-
-
 def main():
+    from archive import initialize, persist, serve
     options = json.loads(Path('/data/options.json').read_text())
-    secret = options['shared_secret']
-    if len(secret) < 32:
-        raise ValueError('shared_secret must contain at least 32 characters')
-    db = connect('/data/telemetry.sqlite')
+    database = '/data/telemetry.sqlite'
+    db = connect(database)
+    initialize(db)
+    from maintenance import initialize as initialize_weekly
+    initialize_weekly(db)
+    server = serve(database, options['node_id'])
     stop = threading.Event()
+    from maintenance import worker
+    threading.Thread(target=worker, args=(database, options, stop), daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     while not stop.is_set():
+        full = False
         try:
             status = supervisor_status(options['target_slug'], os.environ['SUPERVISOR_TOKEN'])
-            collect(db, options['log_path'], options['node_id'], time.time(), options['max_batches'], status)
-        except (OSError, RuntimeError) as error:
-            print('collector: {}'.format(type(error).__name__), flush=True)
-        try:
-            send_pending(db, options['receiver_url'], secret)
+            batch = collect(db, options['log_path'], options['node_id'], time.time(), status=status)
+            persist(db, options['retention_days'], options['max_storage_mb'])
+            full = len(batch['events']) >= 33
         except Exception as error:
-            # Avoid printing request URLs, headers or secrets.
-            print('delivery: {}'.format(type(error).__name__), flush=True)
-        stop.wait(options['poll_seconds'])
+            print('collection: {}'.format(type(error).__name__), flush=True)
+        stop.wait(1 if full else options['poll_seconds'])
+    server.shutdown()
+    server.server_close()
+    db.close()
 
 
 if __name__ == '__main__':

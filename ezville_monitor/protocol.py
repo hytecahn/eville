@@ -1,4 +1,4 @@
-"""Wire format for outbound-only telemetry; no HA credentials leave the host."""
+"""Bounded serialization and defense-in-depth telemetry redaction."""
 import hashlib
 import hmac
 import json
@@ -12,6 +12,8 @@ def redact(text):
     text = re.sub(r'''(?ix)((?:password|passwd|token|secret|api_key|mqtt_id|ew11_id)["']?\s*[:=]\s*)["']?[^\s,;}]+''', r'\1[REDACTED]', text)
     text = re.sub(r'(https?://)[^/\s:@]+:[^/\s@]+@', r'\1[REDACTED]@', text)
     text = re.sub(r'\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b', '[REDACTED]', text)
+    text = re.sub(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', '[IP]', text)
+    text = re.sub(r'(?i)\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b', '[MAC]', text)
     return text[:4096]
 
 
