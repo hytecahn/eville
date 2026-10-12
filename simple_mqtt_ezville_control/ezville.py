@@ -956,7 +956,7 @@ async def ezville_loop(config):
                     statcmd = [key, 'NULL']
                     
                     CMD_QUEUE.put_nowait({'sendcmd': sendcmd, 'recvcmd': recvcmd, 'statcmd': statcmd,
-                                          'elevator_direction': topics[2].removeprefix('elevator-'),
+                                          'elevator_direction': topics[2][len('elevator-'):],
                                           'elevator_request_id': uuid.uuid4().hex})
 
                     if debug:
