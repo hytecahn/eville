@@ -23,8 +23,6 @@
     "max_storage_mb": 256,
     "weekly_enabled": false,
     "publish_pr": false,
-    "openai_api_key": "",
-    "github_token": "",
     "ai_model": "gpt-5.4"
   },
   "schema": {
