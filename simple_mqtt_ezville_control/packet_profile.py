@@ -40,7 +40,8 @@ class PacketProfiler:
                     'bucket_start': self.started, 'variants': {}, 'other_variant_count': 0,
                     'variant_changes': 0}
         if entry is not None:
-            fingerprint = hashlib.sha256(packet.encode('ascii')).hexdigest()
+            # A 128-bit digest keeps the retained five-minute profile compact.
+            fingerprint = hashlib.sha256(packet.encode('ascii')).hexdigest()[:32]
             if entry.get('_previous_variant') is not None and entry['_previous_variant'] != fingerprint:
                 entry['variant_changes'] += 1
             entry['_previous_variant'] = fingerprint
