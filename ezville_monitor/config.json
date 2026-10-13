@@ -1,6 +1,6 @@
 {
   "name": "EzVille Monitor",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "slug": "ezville_monitor",
   "description": "HA-local log archive, Monday 08:00 KST analysis and draft maintenance PRs",
   "arch": [

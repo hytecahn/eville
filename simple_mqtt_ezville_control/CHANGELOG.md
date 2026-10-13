@@ -1,3 +1,7 @@
+## 0.0.16 (candidate)
+- Classify operator-confirmed elevator-call structural signatures in passive profiles.
+- Accept a bounded `car_entry` observation marker; no physical commands added.
+
 수정 사항 Changelog
 
 ## 0.0.14

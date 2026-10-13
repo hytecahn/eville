@@ -1,5 +1,7 @@
 """Deterministic, HA-local daily EW11 report. Log text is never forwarded to HA notifications."""
 from collections import Counter, deque
+from packet_labels import classify
+import storage
 import datetime as dt
 import json
 import re
@@ -212,7 +214,7 @@ def summarize(database, node, start, end):
         'counts': dict(counts), 'calls': calls, 'arrival_signals': len(arrivals),
         'unmatched_arrival_signals': len(arrivals) - sum('arrival_at' in c for c in calls),
         'latest_source_exists': latest_source_exists,
-        'packet_patterns': pattern_list, 'new_packet_patterns': [item['signature'] for item in pattern_list if item['signature'] not in seen],
+        'packet_patterns': [classify(item) for item in pattern_list], 'new_packet_patterns': [item['signature'] for item in pattern_list if item['signature'] not in seen],
         'packet_pattern_overflow': pattern_overflow, 'packet_markers': marker_reports,
         'packet_baseline_ready': bool(seen),
     }
@@ -243,6 +245,10 @@ def render(summary, max_calls=30, raw_samples=False):
                  if packet_counts else '수신 패킷 프로필 없음')
     lines.append(f"조명 상태 변화 {c.get('light_power_changes', 0)}회 · 온도조절 모드 변화 {c.get('thermostat_power_changes', 0)}회 · "
                  f"설정온도 변화 {c.get('thermostat_setTemp_changes', 0)}회")
+    for item in summary.get('packet_patterns', []):
+        if item.get('category', '').startswith('elevator_'):
+            lines.append(f"- {item['label']} {item['signature']}: {item['count']}회 (사용자 확인 분류 · 실제 도착 확정 아님)")
+    lines.extend(storage.render(summary.get('storage')))
     unknown = [item for item in summary.get('packet_patterns', []) if not item['known']]
     lines.append(f"해석되지 않은 패킷 유형 {len(unknown)}개 · 새 유형 {len(summary.get('new_packet_patterns', []))}개"
                  + ('' if summary.get('packet_baseline_ready') else ' (첫날 기준선 학습 중)'))
@@ -327,6 +333,10 @@ def run_daily(database, options, now, token, force=False):
         db.commit()
     try:
         summary = summarize(database, options['node_id'], start, end)
+        with sqlite3.connect(database) as db:
+            prior = db.execute("SELECT body FROM daily_reports WHERE day<? AND status='done' ORDER BY day DESC LIMIT 1", (day,)).fetchone()
+        previous_storage = json.loads(prior[0]).get('storage') if prior else None
+        summary['storage'] = storage.measure(database, options, now, previous_storage)
         message = render(summary)
         notify(token, day, message, options.get('daily_notify_service', ''))
         with sqlite3.connect(database) as db:
