@@ -55,6 +55,41 @@ class RemoteTests(unittest.TestCase):
         self.db.close()
         self.temp.cleanup()
 
+    def test_signed_packet_range_is_bounded_and_never_returns_raw_samples(self):
+        now = time.time()
+        item = {'signature': '33:01:C3:03', 'known': False, 'count': 3,
+                'first': now - 50, 'last': now - 20, 'bucket_start': now - 300,
+                'samples': ['PRIVATE_RAW_FRAME'], 'variants': {'a' * 32: 3},
+                'other_variant_count': 0, 'variant_changes': 0}
+        events = [{'kind': 'log', 'text': '[PACKET_PROFILE] ' + json.dumps(item)}]
+        with self.db:
+            self.db.execute('INSERT INTO batches VALUES (?,?,?,?,?)', ('range', 'home', now, now, json.dumps({'events': events})))
+        result = self.read('/v1/packets', {'start': now - 40, 'end': now - 10})
+        self.assertEqual(result['profiles'][0]['count'], 3)
+        self.assertTrue(result['profiles'][0]['partially_overlapping'])
+        self.assertEqual(result['profiles'][0]['category'], 'elevator_call_response')
+        self.assertNotIn('PRIVATE_RAW_FRAME', json.dumps(result))
+        self.assertNotIn('samples', result['profiles'][0])
+        self.assertFalse(result['observation_complete'])
+        for payload in ({'start': now - 4000, 'end': now - 1}, {'start': True, 'end': now},
+                        {'start': now - 10, 'end': now + 3600}, {'start': now - 10},
+                        {'start': now - 40, 'end': now - 10, 'path': '/data/options.json'}):
+            request, _ = self.request('/v1/packets', payload)
+            self.assertEqual(self.status(request), 400)
+        request, _ = self.request('/v1/packets', {'start': now - 40, 'end': now - 10}, key='wrong')
+        self.assertEqual(self.status(request), 401)
+
+    def test_daily_read_exports_stored_storage_snapshot(self):
+        day, start, end = daily.window(time.time())
+        summary = daily.summarize(self.database, 'home', start, end)
+        summary['storage'] = {'measured_at': end + 100, 'source_logs': {'file_bytes': 123}}
+        with self.db:
+            daily.initialize(self.db)
+            self.db.execute('INSERT INTO daily_reports VALUES (?,?,?,?)',
+                            (day, 'done', end + 100, json.dumps(summary)))
+        result = self.read('/v1/daily')
+        self.assertEqual(result['summary']['storage']['source_logs']['file_bytes'], 123)
+
     def request(self,path='/v1/report',payload=None,key=None,stamp=None,nonce=None):
         body=json.dumps(payload or {},separators=(',',':')).encode()
         stamp=stamp or str(int(time.time()))

@@ -15,7 +15,7 @@ from protocol import redact
 
 MAX_REQUEST = 1024
 MAX_RESPONSE = 262144
-PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily'}
+PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily', '/v1/packets'}
 ACTION_PATH = '/v1/daily/run'
 
 
@@ -37,6 +37,8 @@ def daily_snapshot(database, node, options, now):
     summary['new_packet_patterns'] = [item['signature'] for item in summary['packet_patterns'] if item['signature'] in new]
     summary['packet_markers'] = summary['packet_markers'][-20:]
     summary['calls'] = summary['calls'][-30:]
+    from packet_labels import classify
+    summary['packet_patterns'] = [classify(item) for item in summary['packet_patterns']]
     # Raw bus addresses/payloads stay inside HA. Fingerprints and lengths let a
     # reviewer compare variants without treating log content as instructions.
     for item in summary['packet_patterns']:
@@ -50,7 +52,7 @@ def daily_snapshot(database, node, options, now):
             candidate.pop('sample', None)
     for call in summary['calls']:
         call.pop('request_id', None)
-    return {'node': node, 'monitor_version': '0.6.1', 'window_day': day,
+    return {'node': node, 'monitor_version': '0.7.0', 'window_day': day,
             'daily_enabled': bool(options.get('daily_enabled')) if options is not None else None,
             'mobile_notification_configured': bool(options.get('daily_notify_service')) if options is not None else None,
             'enabled_since': state.get('enabled_since'),
@@ -201,7 +203,7 @@ def handler(database, node, secret, options=None):
                 if not authenticated:
                     return self.reply(401, {}, action=action)
                 payload = json.loads(body)
-                if not isinstance(payload, dict) or set(payload) - ({'limit'} if self.path == '/v1/recent' else set()):
+                if not isinstance(payload, dict) or set(payload) - ({'limit'} if self.path == '/v1/recent' else {'start', 'end'} if self.path == '/v1/packets' else set()):
                     return self.reply(400, {}, nonce, action=action)
                 if action:
                     from daily import run_daily, window
@@ -215,6 +217,9 @@ def handler(database, node, secret, options=None):
                     if type(limit) is not int or not 1 <= limit <= 30:
                         return self.reply(400, {}, nonce)
                     result = {'node': node, 'events': recent(database, node, limit)}
+                elif self.path == '/v1/packets':
+                    from packet_ranges import read
+                    result = read(database, node, payload.get('start'), payload.get('end'), now)
                 elif self.path == '/v1/daily':
                     result = daily_snapshot(database, node, options, now)
                 else:

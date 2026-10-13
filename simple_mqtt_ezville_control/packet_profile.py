@@ -35,7 +35,7 @@ class PacketProfiler:
             if len(self.patterns) >= MAX_SIGNATURES:
                 self.overflow += 1
             else:
-                entry = self.patterns[key] = {'signature': key, 'known': bool(known),
+                entry = self.patterns[key] = {'signature': key, 'known': bool(known or key in ('33:01:43:01', '33:01:C3:03')),
                     'count': 0, 'first': now, 'last': now, 'samples': [],
                     'bucket_start': self.started, 'variants': {}, 'other_variant_count': 0,
                     'variant_changes': 0}
@@ -66,7 +66,7 @@ class PacketProfiler:
         now = time.time() if now is None else now
         if self.trace and now > self.trace['end']:
             self.trace = None
-        if label not in ('bell', 'door_open', 'other') or self.trace or now - self.last_mark < 60:
+        if label not in ('bell', 'door_open', 'car_entry', 'other') or self.trace or now - self.last_mark < 60:
             return False
         self.last_mark = now
         self.trace = {'label': label, 'at': now, 'end': now + 15, 'remaining': MAX_TRACE}

@@ -8,6 +8,20 @@ from packet_profile import PacketProfiler
 
 
 class PacketProfileTests(unittest.TestCase):
+    def test_confirmed_elevator_signatures_and_car_marker(self):
+        lines = []
+        profiler = PacketProfiler(lines.append)
+        profiler.started, profiler.next_flush = 100, 160
+        for frame in ('F733014301112233', 'F73301C303112233'):
+            profiler.observe(frame, False, now=101)
+        self.assertTrue(profiler.mark('car_entry', now=102))
+        self.assertFalse(profiler.mark('car_entry', now=103))
+        profiler.flush(160)
+        profiles = [json.loads(line.split('] ', 1)[1]) for line in lines if line.startswith('[PACKET_PROFILE]')]
+        self.assertTrue(all(profile['known'] for profile in profiles))
+        self.assertEqual(sum(profile['count'] for profile in profiles), 2)
+        self.assertIn('car_entry', next(line for line in lines if line.startswith('[PACKET_MARK]')))
+
     def test_all_validated_frames_are_counted_with_bounded_samples(self):
         lines = []
         profiler = PacketProfiler(lines.append)

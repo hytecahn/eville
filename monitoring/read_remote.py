@@ -43,13 +43,16 @@ def query(origin, key, endpoint, payload=None):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('endpoint',choices=['health','report','recent','daily'])
+    p.add_argument('endpoint',choices=['health','report','recent','daily','packets'])
+    p.add_argument('--start', type=int, help='Packet range start, Unix seconds')
+    p.add_argument('--end', type=int, help='Packet range end, Unix seconds')
     p.add_argument('--origin',required=True)
     p.add_argument('--key-file',type=Path)
     p.add_argument('--check',action='store_true',help='Return freshness exit status without exposing telemetry in CI logs')
     a=p.parse_args()
     key = a.key_file.read_text().strip() if a.key_file else os.environ['EZVILLE_REMOTE_SECRET']
-    result=query(a.origin,key,a.endpoint)
+    payload = {'start': a.start, 'end': a.end} if a.endpoint == 'packets' else None
+    result=query(a.origin,key,a.endpoint,payload)
     if a.check:
         if a.endpoint != 'health':
             raise ValueError('--check requires health')

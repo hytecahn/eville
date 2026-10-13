@@ -39,6 +39,31 @@ class DailyTests(unittest.TestCase):
             conn.execute('INSERT INTO batches VALUES (?,?,?,?,?)',
                          (str(self.counter), 'home', when, when, json.dumps({'events': events})))
 
+    def test_operator_labels_do_not_create_verified_arrivals(self):
+        at = self.start + 100
+        for signature in ('33:01:43:01', '33:01:C3:03'):
+            profile = {'signature': signature, 'known': False, 'count': 2,
+                       'first': at, 'last': at + 1, 'samples': []}
+            self.append(at + 10, [(at, '[PACKET_PROFILE] ' + json.dumps(profile))])
+        report = daily.summarize(self.db, 'home', self.start, self.end)
+        self.assertTrue(all(p['known'] for p in report['packet_patterns']))
+        self.assertTrue(all(p['classification_basis'] == 'operator_confirmed_elevator_call' for p in report['packet_patterns']))
+        self.assertEqual(report['arrival_signals'], 0)
+        self.assertIn('엘리베이터 호출', daily.render(report))
+
+    def test_daily_persists_storage_and_reports_growth_from_previous_day(self):
+        options = {'daily_enabled': True, 'node_id': 'home', 'log_path': str(Path(self.temp.name) / 'source.log')}
+        Path(options['log_path']).write_bytes(b'x' * 100)
+        with patch.object(daily, 'notify') as send:
+            self.assertTrue(daily.run_daily(self.db, options, self.end + 100, 'test', force=True))
+            Path(options['log_path']).write_bytes(b'x' * 250)
+            self.assertTrue(daily.run_daily(self.db, options, self.end + 86400 + 100, 'test', force=True))
+        with sqlite3.connect(self.db) as conn:
+            saved = json.loads(conn.execute('SELECT body FROM daily_reports ORDER BY day DESC LIMIT 1').fetchone()[0])
+        self.assertEqual(saved['storage']['source_logs']['file_bytes'], 250)
+        self.assertEqual(saved['storage']['source_logs']['retained_change_bytes'], 150)
+        self.assertIn('원본 로그', send.call_args[0][2])
+
     def test_window_is_last_24_hours_at_22_kst(self):
         day, start, end = daily.window(self.end + 5)
         self.assertEqual(day, '2026-10-13')
