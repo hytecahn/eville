@@ -1,3 +1,8 @@
+## 0.0.17 (candidate)
+- Retain MQTT discovery configurations so HA can restore entities after MQTT reload/restart.
+- Re-register devices and republish unchanged states on HA online birth messages, even with reboot_control disabled.
+- Keep entity IDs, command payloads and non-retained physical control commands unchanged.
+
 ## 0.0.16 (candidate)
 - Classify operator-confirmed elevator-call structural signatures in passive profiles.
 - Accept a bounded `car_entry` observation marker; no physical commands added.

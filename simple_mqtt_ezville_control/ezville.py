@@ -418,19 +418,21 @@ async def ezville_loop(config):
         last_mqtt_message_time = time.monotonic()
         
         if msg.topic == 'homeassistant/status':
-            # Reboot Control 사용 시 MQTT Integration의 Birth/Last Will Testament Topic은 바로 처리
-            if REBOOT_CONTROL:
-                status = msg.payload.decode('utf-8', errors='replace')
-                
-                if status == 'online':
-                    log('[INFO] MQTT Integration 온라인')
+            status = msg.payload.decode('utf-8', errors='replace')
+            if status == 'online':
+                # HA can restart/reload MQTT while this client's connection stays up.
+                # Always re-discover and publish unchanged states on the asyncio loop,
+                # independently of the optional communication-session reboot control.
+                log('[INFO] MQTT Integration 온라인; 장치 재등록 및 상태 재발행 요청')
+                session_loop.call_soon_threadsafe(reset_discovery)
+                if REBOOT_CONTROL:
                     MQTT_ONLINE = True
                     if not msg.retain:
                         log('[INFO] MQTT Birth Message가 Retain이 아니므로 정상화까지 Delay 부여')
                         startup_delay = REBOOT_DELAY
-                elif status == 'offline':
-                    log('[INFO] MQTT Integration 오프라인')
-                    MQTT_ONLINE = False
+            elif status == 'offline' and REBOOT_CONTROL:
+                log('[INFO] MQTT Integration 오프라인')
+                MQTT_ONLINE = False
         # 나머지 topic은 모두 Queue에 보관
         elif msg.topic in (EW11_TOPIC + '/recv', HA_TOPIC + '/packet/mark') or (
                 msg.topic.startswith(HA_TOPIC + '/') and msg.topic.endswith('/command')):
@@ -781,7 +783,7 @@ async def ezville_loop(config):
         # Discovery에 등록
         topic = 'homeassistant/{}/ezville_wallpad/{}/config'.format(intg, payload['name'])
         log('[INFO] 장치 등록:  {}'.format(topic))
-        publish_checked(topic, json.dumps(payload))
+        publish_checked(topic, json.dumps(payload), retain=True)
 
     
     # 장치 State를 MQTT로 Publish
@@ -1200,8 +1202,8 @@ async def ezville_loop(config):
             await asyncio.sleep(COMMAND_LOOP_DELAY)    
  
 
-    def publish_checked(topic, payload):
-        result = mqtt_client.publish(topic, payload)
+    def publish_checked(topic, payload, retain=False):
+        result = mqtt_client.publish(topic, payload, retain=retain)
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise ConnectionError('MQTT publish rejected rc={}'.format(result.rc))
 
