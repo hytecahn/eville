@@ -25,6 +25,7 @@ def frame(header, body):
 class MQTTWireTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_paho_reconnects_resubscribes_and_republishes(self):
         publications, writers, handlers, logs = [], [], set(), []
+        retention_flags = []
         connections = 0
 
         async def broker(reader, writer):
@@ -52,7 +53,9 @@ class MQTTWireTests(unittest.IsolatedAsyncioTestCase):
                         writer.write(frame(0x30, len(topic).to_bytes(2, 'big') + topic + STATE))
                     elif kind == 3:
                         size = int.from_bytes(body[:2], 'big')
-                        publications.append((body[2:2+size].decode(), body[2+size:]))
+                        topic_name = body[2:2+size].decode()
+                        publications.append((topic_name, body[2+size:]))
+                        retention_flags.append((topic_name, bool(header & 1)))
                     elif kind == 12:
                         writer.write(b'\xd0\x00')
                     elif kind == 14:
@@ -80,6 +83,9 @@ class MQTTWireTests(unittest.IsolatedAsyncioTestCase):
             worker = asyncio.create_task(ezville.ezville_loop(config))
             try:
                 await wait_for(lambda: (topic, b'18') in publications)
+                config_topic = 'homeassistant/climate/ezville_wallpad/ezville_thermostat_01_01/config'
+                self.assertIn((config_topic, True), retention_flags)
+                self.assertIn((topic, False), retention_flags)
                 await asyncio.sleep(.05)
                 publications.clear()
                 writers[0].close()

@@ -27,6 +27,7 @@ class FakeClient:
 
     def __init__(self, *args, **kwargs):
         self.publications = []
+        self.publication_retains = []
         self.stopped = False
         self.disconnected = False
         self.on_connect = self.on_disconnect = self.on_message = None
@@ -43,8 +44,9 @@ class FakeClient:
     def loop_stop(self): self.stopped = True
     def disconnect(self): self.disconnected = True
 
-    def publish(self, topic, payload):
+    def publish(self, topic, payload, retain=False):
         self.publications.append((topic, payload))
+        self.publication_retains.append((topic, retain))
         if self.reject_first and len(self.__class__.instances) == 1:
             return SimpleNamespace(rc=4)
         return SimpleNamespace(rc=0)
@@ -93,6 +95,28 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         client.emit('ew11/recv', raw[:7]); client.emit('ew11/recv', raw[7:])
         await self.wait_for(lambda: any(t == 'ezville/thermostat_01_01/setTemp/state' for t, _ in client.publications))
         self.assertIn(('ezville/thermostat_01_01/setTemp/state', b'18'), client.publications)
+
+    async def test_discovery_is_retained_and_ha_birth_recovers_without_reboot_control(self):
+        self.config['reboot_control'] = False
+        client = await self.start()
+        state_topic = 'ezville/thermostat_01_01/setTemp/state'
+        config_topic = 'homeassistant/climate/ezville_wallpad/ezville_thermostat_01_01/config'
+        client.emit('ew11/recv', bytes.fromhex(STATE))
+        await self.wait_for(lambda: any(t == state_topic for t, _ in client.publications))
+        self.assertIn((config_topic, True), client.publication_retains)
+        self.assertIn((state_topic, False), client.publication_retains)
+        original_config = next(p for t, p in client.publications if t == config_topic)
+        await asyncio.sleep(.02)
+        client.publications.clear()
+        # HA reloading does not reconnect the still healthy add-on MQTT client.
+        client.emit('homeassistant/status', b'online')
+        await asyncio.sleep(.01)
+        client.emit('ew11/recv', bytes.fromhex(STATE))
+        await self.wait_for(lambda: any(t == state_topic for t, _ in client.publications))
+        self.assertEqual(next(p for t, p in client.publications if t == config_topic), original_config)
+        self.assertEqual(len(FakeClient.instances), 1)
+        self.assertFalse(any(t == 'ew11/send' for t, _ in client.publications))
+        self.assertTrue(all(not retained for topic, retained in client.publication_retains if not topic.startswith('homeassistant/')))
 
     async def test_corrupt_fragment_does_not_poison_next_frame(self):
         client = await self.start()

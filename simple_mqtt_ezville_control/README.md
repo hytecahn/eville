@@ -196,3 +196,19 @@ python -m unittest discover -s simple_mqtt_ezville_control/tests -v
 월패드의 타이밍·전기적 충돌을 재현하지 않으므로 실기기 확인은 별도로 필요합니다.
 Docker 베이스는 이번 변경에서 기존 Python 3.8 이미지를 유지했습니다. 지원되는
 Python/배포판으로의 이행은 별도 검증이 필요한 후속 작업입니다.
+
+
+## MQTT entity recovery (0.0.17)
+
+Discovery configuration is retained at its existing `homeassistant/.../config`
+topic. Home Assistant can therefore reload MQTT or restart without losing the
+registered entities. The add-on also listens for `online` on the default HA
+birth topic `homeassistant/status` and clears its passive discovery/state
+caches on the asyncio loop. Subsequent valid bus frames re-register devices
+and republish unchanged values, even when `reboot_control` is disabled.
+Existing entity IDs and unique IDs are preserved. State messages and physical
+control commands remain non-retained; no commands are sent by this recovery.
+If HA uses a custom or disabled birth topic, retained discovery still restores
+registration, while state refresh depends on bus traffic and the existing
+force-update settings. MQTT broker persistence governs retention across broker
+restarts. No MQTT/HA credentials or production logs are included in this change.
