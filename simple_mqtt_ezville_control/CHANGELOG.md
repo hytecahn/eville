@@ -1,3 +1,8 @@
+## 0.0.18
+- Keep EW11 outage state across communication-session restarts so one outage does not emit an offline alert on every reconnect.
+- Retry EW11 recovery separately from status transitions, at most once per EW11 timeout (minimum 60 seconds).
+- Publish online after packet reception resumes and allow a new alert for a later outage.
+
 ## 0.0.17 (candidate)
 - Retain MQTT discovery configurations so HA can restore entities after MQTT reload/restart.
 - Re-register devices and republish unchanged states on HA online birth messages, even with reboot_control disabled.

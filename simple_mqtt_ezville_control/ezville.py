@@ -341,6 +341,9 @@ async def ezville_loop(config):
     # EW11 동작상태 확인용 메시지 수신 시간 체크 주기 및 체크용 시간 변수
     EW11_TIMEOUT = config['ew11_timeout']
     last_received_time = time.monotonic()
+    # Outage state must survive communication-session recreation.
+    ew11_status = 'online'
+    next_ew11_recovery_time = 0.0
 
     # Paho의 자동 재접속 스레드까지 멈춘 경우를 감지하기 위한 상태값
     MQTT_RECONNECT_TIMEOUT = 120
@@ -1007,9 +1010,7 @@ async def ezville_loop(config):
                                                 
     # EW11 동작 상태를 체크해서 필요시 리셋 실시 및 HA에 상태 알림
     async def ew11_health_loop():
-        nonlocal restart_flag
-        
-        ew11_status = 'online'  # EW11 상태 추적: 'online' 또는 'offline'
+        nonlocal restart_flag, ew11_status, next_ew11_recovery_time
         
         while True:
             timestamp = time.monotonic()
@@ -1032,6 +1033,9 @@ async def ezville_loop(config):
                     except Exception as _e:
                         log('[ERROR] EW11 상태 publish 실패: {}'.format(_e))
                     
+                # Retry recovery separately from the one-time outage alert.
+                if timestamp >= next_ew11_recovery_time:
+                    next_ew11_recovery_time = timestamp + max(EW11_TIMEOUT, 60)
                     # EW11 재시작 시도
                     try:
                         log('[INFO] EW11 기기 재시작 시도')
@@ -1046,6 +1050,7 @@ async def ezville_loop(config):
                 if ew11_status == 'offline':
                     # 타임아웃 해제되어 다시 online 상태로 변경 시 HA에 알림
                     ew11_status = 'online'
+                    next_ew11_recovery_time = 0.0
                     log('[INFO] EW11 패킷 수신 복구됨')
                     
                     # HA에 EW11 복구 상태 알림

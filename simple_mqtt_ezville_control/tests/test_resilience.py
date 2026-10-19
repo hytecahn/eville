@@ -89,6 +89,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.01)
         return FakeClient.instances[-1]
 
+    async def test_outage_alert_and_recovery_backoff_survive_session_restart(self):
+        self.config['ew11_timeout'] = .05
+        with patch.object(ezville.telnetlib, 'Telnet', side_effect=OSError('unreachable')) as reset:
+            await self.start()
+            await self.wait_for(lambda: len(FakeClient.instances) >= 2)
+            client = FakeClient.instances[-1]
+            await asyncio.sleep(.15)
+            statuses = [json.loads(p)['status'] for c in FakeClient.instances
+                        for t, p in c.publications if t == 'ezville/ew11/status']
+            self.assertEqual(statuses, ['offline'])
+            self.assertEqual(reset.call_count, 1)
+            client.emit('ew11/recv', bytes.fromhex(STATE))
+            await self.wait_for(lambda: any(t == 'ezville/ew11/status' and
+                                json.loads(p)['status'] == 'online'
+                                for t, p in client.publications))
+            await self.wait_for(lambda: reset.call_count == 2)
+            statuses = [json.loads(p)['status'] for c in FakeClient.instances
+                        for t, p in c.publications if t == 'ezville/ew11/status']
+            self.assertEqual(statuses, ['offline', 'online', 'offline'])
+
     async def test_split_frame_and_state_publication(self):
         client = await self.start()
         raw = bytes.fromhex(STATE)

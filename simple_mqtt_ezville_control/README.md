@@ -212,3 +212,20 @@ If HA uses a custom or disabled birth topic, retained discovery still restores
 registration, while state refresh depends on bus traffic and the existing
 force-update settings. MQTT broker persistence governs retention across broker
 restarts. No MQTT/HA credentials or production logs are included in this change.
+
+
+## EW11 outage alerts and recovery (0.0.18)
+
+EW11 status is tracked for the lifetime of the communication worker, including
+communication-session recreation. One continuous outage publishes one offline
+transition; recovery attempts continue independently, no more often than
+`max(ew11_timeout, 60)` seconds. A received packet permits the next health check
+to publish online. A later outage can publish offline again. Restarting the
+worker process starts a new status lifecycle.
+
+Home Assistant recovery automations should filter `ezville/ew11/status` using
+`value_template: "{{ value_json.status | default('unknown') }}"` and
+`payload: offline`. Do not power-cycle on an online recovery message. Add a
+cooldown and check that the relay controller is available before attempting
+physical recovery. A Shelly UNI which is itself offline cannot restore EW11
+power remotely; that case needs a separate operator notification.
