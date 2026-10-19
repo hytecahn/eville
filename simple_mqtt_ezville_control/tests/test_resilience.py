@@ -100,10 +100,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                         for t, p in c.publications if t == 'ezville/ew11/status']
             self.assertEqual(statuses, ['offline'])
             self.assertEqual(reset.call_count, 1)
-            client.emit('ew11/recv', bytes.fromhex(STATE))
-            await self.wait_for(lambda: any(t == 'ezville/ew11/status' and
-                                json.loads(p)['status'] == 'online'
-                                for t, p in client.publications))
+            async def healthy_bus():
+                while True:
+                    client.emit('ew11/recv', bytes.fromhex(STATE))
+                    await asyncio.sleep(.005)
+            packets = asyncio.create_task(healthy_bus())
+            try:
+                await self.wait_for(lambda: any(t == 'ezville/ew11/status' and
+                                    json.loads(p)['status'] == 'online'
+                                    for t, p in client.publications))
+            finally:
+                packets.cancel()
+                await asyncio.gather(packets, return_exceptions=True)
             await self.wait_for(lambda: reset.call_count == 2)
             statuses = [json.loads(p)['status'] for c in FakeClient.instances
                         for t, p in c.publications if t == 'ezville/ew11/status']
