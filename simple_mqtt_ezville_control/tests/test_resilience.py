@@ -228,6 +228,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         client.emit('ezville/batch_01_01/elevator-down/command', b'PRESS', retain=True)
         await asyncio.sleep(.03)
         self.assertFalse(any(t == 'ew11/send' for t, _ in client.publications))
+        client.emit('ew11/recv', bytes.fromhex(STATE))
+        await self.wait_for(lambda: any(t.endswith('/setTemp/state') for t, _ in client.publications))
         client.emit('ezville/batch_01_01/elevator-down/command', b'PRESS')
         await self.wait_for(lambda: any(t == 'ew11/send' for t, _ in client.publications))
         await self.wait_for(lambda: any('[EVENT] elevator_call_sent direction=down' in line for line in self.logs))
@@ -249,6 +251,62 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event['event'], 'elevator_arrival')
         self.assertGreater(event['timestamp'], 1700000000)
         self.assertTrue(any('[EVENT] elevator_arrival_signal' in line for line in self.logs))
+
+    async def test_elevator_rejected_without_fresh_bus_and_not_replayed(self):
+        client = await self.start()
+        client.emit('ezville/batch_01_01/elevator-down/command', b'PRESS')
+        await self.wait_for(lambda: any(t == 'ezville/elevator/result' for t, _ in client.publications))
+        self.assertFalse(any(t == 'ew11/send' for t, _ in client.publications))
+        client.emit('ew11/recv', bytes.fromhex(STATE))
+        await asyncio.sleep(.05)
+        self.assertFalse(any(t == 'ew11/send' for t, _ in client.publications))
+
+    async def test_actual_local_elevator_variants_are_evidence_not_arrival(self):
+        client = await self.start()
+        client.emit('ew11/recv', bytes.fromhex(STATE))
+        await self.wait_for(lambda: any(t.endswith('/setTemp/state') for t, _ in client.publications))
+        client.emit('ezville/batch_01_01/elevator-down/command', b'PRESS')
+        await self.wait_for(lambda: any(t == 'ew11/send' for t, _ in client.publications))
+        # Actual production samples, including a split frame and duplicate polls.
+        client.emit('ew11/recv', bytes.fromhex('F733014301'))
+        client.emit('ew11/recv', bytes.fromhex('109716F73301C30300040001F6'))
+        await self.wait_for(lambda: sum(t == 'ezville/elevator/evidence' for t, _ in client.publications) == 2)
+        evidence = [json.loads(p) for t, p in client.publications if t == 'ezville/elevator/evidence']
+        self.assertEqual([e['kind'] for e in evidence], ['signal_candidate', 'response'])
+        self.assertTrue(all(e.get('request_id') and e['elapsed_seconds'] >= 0 for e in evidence))
+        self.assertTrue(all(not e['arrival_verified'] for e in evidence))
+        self.assertFalse(any(t == 'ezville/elevator/arrival' for t, _ in client.publications))
+
+    async def test_corrupt_traffic_does_not_prevent_outage_detection(self):
+        self.config['ew11_timeout'] = .08
+        with patch.object(ezville.telnetlib, 'Telnet', side_effect=OSError('unreachable')) as reset:
+            await self.start()
+            for _ in range(30):
+                FakeClient.instances[-1].emit('ew11/recv', bytes(10))
+                await asyncio.sleep(.01)
+            self.assertGreaterEqual(reset.call_count, 1)
+            statuses = [json.loads(p)['status'] for c in FakeClient.instances
+                        for t, p in c.publications if t == 'ezville/ew11/status']
+            self.assertEqual(statuses, ['offline'])
+
+    async def test_physical_recovery_survives_session_restart(self):
+        self.config['ew11_timeout'] = .05
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = ezville.bounded_call
+        async def delayed(function, timeout):
+            if timeout == 30:
+                entered.set()
+                await release.wait()
+                raise OSError('test reset completion')
+            return await original(function, timeout)
+        with patch.object(ezville, 'bounded_call', delayed):
+            await self.start()
+            await self.wait_for(entered.is_set)
+            await self.wait_for(lambda: len(FakeClient.instances) >= 2)
+            # Old session has ended but the reset coroutine is still alive.
+            release.set()
+            await self.wait_for(lambda: any('test reset completion' in l for l in self.logs))
+            self.assertTrue(any('유효 패킷 없음' in l for l in self.logs))
 
     async def test_cleanup_timeout_exits_worker_instead_of_reusing_client(self):
         client = await self.start()
