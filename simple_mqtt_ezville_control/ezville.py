@@ -343,6 +343,7 @@ async def ezville_loop(config):
     last_received_time = time.monotonic()
     # Outage state must survive communication-session recreation.
     ew11_status = 'online'
+    pending_ew11_status = None
     next_ew11_recovery_time = 0.0
 
     # Paho의 자동 재접속 스레드까지 멈춘 경우를 감지하기 위한 상태값
@@ -1010,62 +1011,47 @@ async def ezville_loop(config):
                                                 
     # EW11 동작 상태를 체크해서 필요시 리셋 실시 및 HA에 상태 알림
     async def ew11_health_loop():
-        nonlocal restart_flag, ew11_status, next_ew11_recovery_time
-        
+        nonlocal restart_flag, ew11_status, pending_ew11_status, next_ew11_recovery_time
+
         while True:
             timestamp = time.monotonic()
             time_since_last_packet = timestamp - last_received_time
-        
-            # TIMEOUT 시간 동안 새로 받은 EW11 패킷이 없으면 상태를 'offline'으로 변경 및 HA에 알림
-            if time_since_last_packet > EW11_TIMEOUT:
-                if ew11_status == 'online':
-                    # 처음 타임아웃 감지 시 HA에 알림
-                    ew11_status = 'offline'
+            offline = time_since_last_packet > EW11_TIMEOUT
+            observed_status = 'offline' if offline else 'online'
+            if observed_status != ew11_status:
+                ew11_status = observed_status
+                # Keep only the latest observed state: replaying a stale offline
+                # after recovery could trigger an unnecessary HA power cycle.
+                pending_ew11_status = {'status': observed_status, 'timestamp': int(time.time())}
+                if offline:
+                    pending_ew11_status.update(
+                        last_packet_time=int(time.time() - time_since_last_packet),
+                        last_packet_age=time_since_last_packet)
                     log('[WARNING] EW11 패킷 수신 타임아웃: {:.1f}초 동안 신호 없음'.format(time_since_last_packet))
-                    
-                    # HA에 EW11 상태 알림 (MQTT publish)
-                    try:
-                        payload = {'status': 'offline', 'timestamp': int(time.time()), 'last_packet_time': int(time.time() - time_since_last_packet), 'last_packet_age': time_since_last_packet}
-                        mqtt_client.publish(HA_TOPIC + '/ew11/status', json.dumps(payload))
-                        log('[ALERT] EW11 offline 상태를 HA에 전송')
-                        if mqtt_log:
-                            log('[LOG] ->> HA : {} >> {}'.format(HA_TOPIC + '/ew11/status', json.dumps(payload)))
-                    except Exception as _e:
-                        log('[ERROR] EW11 상태 publish 실패: {}'.format(_e))
-                    
-                # Retry recovery separately from the one-time outage alert.
-                if timestamp >= next_ew11_recovery_time:
-                    next_ew11_recovery_time = timestamp + max(EW11_TIMEOUT, 60)
-                    # EW11 재시작 시도
-                    try:
-                        log('[INFO] EW11 기기 재시작 시도')
-                        await asyncio.wait_for(reset_EW11(), timeout=90)
-                    except Exception as _e:
-                        log('[ERROR] EW11 기기 재시작 오류: {}'.format(_e))
-                    finally:
-                        # Telnet 리셋의 성공 여부와 관계없이 로컬 통신 task도
-                        # 반드시 새로 만들어 정지된 MQTT/socket 상태를 복구한다.
-                        restart_flag = True
-            else:
-                if ew11_status == 'offline':
-                    # 타임아웃 해제되어 다시 online 상태로 변경 시 HA에 알림
-                    ew11_status = 'online'
+                else:
                     next_ew11_recovery_time = 0.0
                     log('[INFO] EW11 패킷 수신 복구됨')
-                    
-                    # HA에 EW11 복구 상태 알림
-                    try:
-                        payload = {'status': 'online', 'timestamp': int(time.time())}
-                        mqtt_client.publish(HA_TOPIC + '/ew11/status', json.dumps(payload))
-                        log('[INFO] EW11 online 상태를 HA에 전송')
-                        if mqtt_log:
-                            log('[LOG] ->> HA : {} >> {}'.format(HA_TOPIC + '/ew11/status', json.dumps(payload)))
-                    except Exception as _e:
-                        log('[ERROR] EW11 상태 publish 실패: {}'.format(_e))
-                else:
-                    if debug:
-                        log('[DEBUG] EW11 연결 상태 정상: {:.1f}초 전 패킷 수신'.format(time_since_last_packet))
-            
+
+            # Retry rejected notifications on each health check, independently
+            # of physical recovery. Pending state survives session recreation.
+            if pending_ew11_status is not None:
+                try:
+                    publish_checked(HA_TOPIC + '/ew11/status', json.dumps(pending_ew11_status))
+                    log('[INFO] EW11 {} 상태 MQTT 발행 접수'.format(pending_ew11_status['status']))
+                    pending_ew11_status = None
+                except Exception as _e:
+                    log('[ERROR] EW11 상태 publish 실패; 재시도 대기: {}'.format(_e))
+
+            if offline and timestamp >= next_ew11_recovery_time:
+                next_ew11_recovery_time = timestamp + max(EW11_TIMEOUT, 60)
+                try:
+                    log('[INFO] EW11 기기 재시작 시도')
+                    await asyncio.wait_for(reset_EW11(), timeout=90)
+                except Exception as _e:
+                    log('[ERROR] EW11 기기 재시작 오류: {}'.format(_e))
+                finally:
+                    restart_flag = True
+
             # EW11_TIMEOUT이 길어도 복구 조건은 최대 60초마다 확인한다.
             await asyncio.sleep(min(EW11_TIMEOUT, 60))
 
@@ -1369,3 +1355,4 @@ if __name__ == '__main__':
     except BaseException:
         log('[FATAL] addon process 비정상 종료:\n{}'.format(traceback.format_exc()))
         raise
+

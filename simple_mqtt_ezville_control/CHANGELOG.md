@@ -1,3 +1,8 @@
+## Unreleased
+- Retry rejected EW11 status publications across communication sessions, independently of physical recovery retries.
+- Replace pending notifications with the latest observed state to avoid replaying stale offline events after recovery.
+- Add failure-injection tests for rejected offline/online messages and recovery before notification acceptance.
+
 ## 0.0.18
 - Keep EW11 outage state across communication-session restarts so one outage does not emit an offline alert on every reconnect.
 - Retry EW11 recovery separately from status transitions, at most once per EW11 timeout (minimum 60 seconds).
@@ -69,3 +74,4 @@ v 0.0.2
 
 v 0.0.1
 준비중
+

@@ -229,3 +229,29 @@ Home Assistant recovery automations should filter `ezville/ew11/status` using
 cooldown and check that the relay controller is available before attempting
 physical recovery. A Shelly UNI which is itself offline cannot restore EW11
 power remotely; that case needs a separate operator notification.
+
+
+
+## Pending EW11 notifications
+
+Observed EW11 status and pending MQTT notification are tracked separately across
+communication sessions. A non-success publish return code or exception leaves
+the notification pending for the next health check (at most 60 seconds apart).
+Notification retries do not bypass the physical recovery cooldown. Once the
+client accepts publication, the notification is cleared; this is QoS 0 client
+acceptance, not broker acknowledgement or proof that HA received it.
+
+If EW11 changes state before a pending message can be accepted, only the latest
+state is sent. In particular, an old offline message is not replayed after bus
+traffic has resumed, since HA might otherwise power-cycle a healthy EW11. This
+is current-state reporting, not a durable history of every outage transition.
+Pending state is in memory and is reset when the worker process restarts.
+Entity IDs, MQTT topics, and command retention behavior are unchanged.
+
+Before production rollout, record the installed version and back up settings.
+Verify MQTT reload and HA restart restore existing entities without restarting
+the add-on; verify broker persistence separately. Then test an EW11 outage,
+MQTT disconnection during offline/online publication, and subsequent recovery.
+Confirm HA recovery automations filter offline only and enforce their own
+cooldown and relay availability checks. Owner approval is required for merge
+and operational rollout. No production recovery has been exercised here.
