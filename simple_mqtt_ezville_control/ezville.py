@@ -340,6 +340,8 @@ async def ezville_loop(config):
     
     # EW11 동작상태 확인용 메시지 수신 시간 체크 주기 및 체크용 시간 변수
     EW11_TIMEOUT = config['ew11_timeout']
+    EW11_RECOVERY_COOLDOWN = config.get('ew11_recovery_cooldown', 120)
+    COMMAND_MAX_PACKET_AGE = config.get('command_max_packet_age', 15)
     last_received_time = time.monotonic()
     # Outage state must survive communication-session recreation.
     ew11_status = 'online'
@@ -358,8 +360,12 @@ async def ezville_loop(config):
     last_command_time = time.monotonic()
     last_state_update_time = time.monotonic()
     last_valid_packet_time = time.monotonic()
-    HEALTH_CHECK_INTERVAL = 60  # 60초마다 헬스 체크 실행
-    HEALTH_CHECK_TIMEOUT = 300  # 300초(5분) 동안 활동이 없으면 먹통으로 판단
+    has_valid_packet = False
+    next_session_recovery_time = 0.0
+    pending_elevator = None
+    previous_batch_state = None
+    HEALTH_CHECK_INTERVAL = min(5, EW11_TIMEOUT)  # Check valid bus traffic every five seconds.
+    HEALTH_CHECK_TIMEOUT = min(30, EW11_TIMEOUT)  # Soft reconnect before EW11 reset.
     
     # EW11 재시작 확인용 Flag
     restart_flag = False
@@ -508,7 +514,7 @@ async def ezville_loop(config):
         nonlocal RESIDUE
         nonlocal MSG_CACHE
         nonlocal DEVICE_STATE
-        nonlocal last_valid_packet_time
+        nonlocal last_valid_packet_time, has_valid_packet, previous_batch_state
         
         raw_data = RESIDUE + raw_data
         RESIDUE = ''
@@ -543,6 +549,7 @@ async def ezville_loop(config):
                     continue
                 else:
                     last_valid_packet_time = time.monotonic()
+                    has_valid_packet = True
                     STATE_PACKET = False
                     ACK_PACKET = False
                     
@@ -555,18 +562,35 @@ async def ezville_loop(config):
 
                     packet_profiler.observe(packet, STATE_PACKET or ACK_PACKET or packet == 'F7330143018007F6')
                     
-                    # 엘리베이터 도착 패킷 감지: F7330143018007F6 (고정 14문자)
-                    # 패킷 분석: F7=시작, 33=엘리베이터, 0143=도착명령, 018007=도착상태, F6=체크섬/add
+                    # Log actual local variants, not only the historic 0x80 sample.
+                    # 0x10/0xC3 are evidence until a physical arrival is correlated.
+                    if packet[2:6] == '3301' and packet[6:8] in ('43', 'C3', '81'):
+                        changed = packet[6:8] != '81' or previous_batch_state != packet
+                        if packet[6:8] == '81':
+                            previous_batch_state = packet
+                        if changed:
+                            kind = ('legacy_arrival' if packet == 'F7330143018007F6' else
+                                    'signal_candidate' if packet[6:8] == '43' else
+                                    'response' if packet[6:8] == 'C3' else 'state_change')
+                            pending = pending_elevator
+                            evidence = {'event': 'elevator_bus_signal', 'kind': kind,
+                                        'packet': packet, 'timestamp': time.time(),
+                                        'arrival_verified': False}
+                            if pending and time.monotonic() - pending['at'] <= 180:
+                                evidence.update(request_id=pending['request_id'],
+                                                direction=pending['direction'],
+                                                elapsed_seconds=round(time.monotonic() - pending['at'], 3))
+                            log('[EVENT] elevator_bus_signal ' + json.dumps(evidence, sort_keys=True))
+                            publish_checked(HA_TOPIC + '/elevator/evidence', json.dumps(evidence))
                     if packet == 'F7330143018007F6':
-                        try:
-                            log('[EVENT] elevator_arrival_signal')
-                            payload = {'event': 'elevator_arrival', 'packet': packet, 'timestamp': int(time.time())}
-                            mqtt_client.publish(HA_TOPIC + '/elevator/arrival', json.dumps(payload))
-                            log('[ALERT] Elevator arrival detected: {}'.format(packet))
-                            if mqtt_log:
-                                log('[LOG] ->> HA : {} >> {}'.format(HA_TOPIC + '/elevator/arrival', json.dumps(payload)))
-                        except Exception as _e:
-                            log('[ERROR] Elevator arrival publish failed: {}'.format(_e))
+                        if pending_elevator:
+                            pending_elevator['reported'] = True
+                        log('[EVENT] elevator_arrival_signal')
+                        payload = {'event': 'elevator_arrival', 'packet': packet,
+                                   'timestamp': int(time.time()), 'arrival_verified': False,
+                                   'basis': 'legacy_protocol_sample'}
+                        publish_checked(HA_TOPIC + '/elevator/arrival', json.dumps(payload))
+                        log('[ALERT] Elevator arrival signal detected: {}'.format(packet))
 
                     if STATE_PACKET or ACK_PACKET:
                         # MSG_CACHE에 없는 새로운 패킷이거나 FORCE_UPDATE 실행된 경우만 실행
@@ -971,6 +995,16 @@ async def ezville_loop(config):
                                                 
     # HA에서 전달된 명령을 EW11 패킷으로 전송
     async def send_to_ew11(send_data):
+        nonlocal pending_elevator
+        if send_data.get('elevator_request_id'):
+            age = time.monotonic() - last_valid_packet_time
+            if not has_valid_packet or age > COMMAND_MAX_PACKET_AGE:
+                result = {'event': 'elevator_call_rejected', 'reason': 'bus_not_ready',
+                          'request_id': send_data['elevator_request_id'],
+                          'packet_age': round(age, 3), 'timestamp': int(time.time())}
+                log('[WARNING] ' + json.dumps(result, sort_keys=True))
+                publish_checked(HA_TOPIC + '/elevator/result', json.dumps(result))
+                return  # Never queue/replay a stale physical call after recovery.
             
         for i in range(CMD_RETRY_COUNT):
             if ew11_log:
@@ -984,6 +1018,12 @@ async def ezville_loop(config):
                     timeout=10,
                 )
             if i == 0 and send_data.get('elevator_request_id'):
+                now = time.monotonic()
+                if (not pending_elevator or now - pending_elevator['last_sent'] > 5 or
+                        pending_elevator['direction'] != send_data['elevator_direction']):
+                    pending_elevator = {'at': now, 'request_id': send_data['elevator_request_id'],
+                                        'direction': send_data['elevator_direction'], 'reported': False}
+                pending_elevator['last_sent'] = now
                 log('[EVENT] elevator_call_sent direction={} request_id={}'.format(
                     send_data['elevator_direction'], send_data['elevator_request_id']))
             if debug:                     
@@ -1015,7 +1055,17 @@ async def ezville_loop(config):
 
         while True:
             timestamp = time.monotonic()
-            time_since_last_packet = timestamp - last_received_time
+            if pending_elevator and not pending_elevator['reported'] and timestamp - pending_elevator['at'] > 180:
+                pending_elevator['reported'] = True
+                result = {'event': 'elevator_arrival_unconfirmed',
+                          'request_id': pending_elevator['request_id'],
+                          'timestamp': int(time.time()), 'arrival_verified': False}
+                log('[WARNING] ' + json.dumps(result, sort_keys=True))
+                try:
+                    publish_checked(HA_TOPIC + '/elevator/result', json.dumps(result))
+                except Exception as error:
+                    log('[ERROR] elevator result publish failed: {}'.format(error))
+            time_since_last_packet = timestamp - last_valid_packet_time
             offline = time_since_last_packet > EW11_TIMEOUT
             observed_status = 'offline' if offline else 'online'
             if observed_status != ew11_status:
@@ -1043,7 +1093,7 @@ async def ezville_loop(config):
                     log('[ERROR] EW11 상태 publish 실패; 재시도 대기: {}'.format(_e))
 
             if offline and timestamp >= next_ew11_recovery_time:
-                next_ew11_recovery_time = timestamp + max(EW11_TIMEOUT, 60)
+                next_ew11_recovery_time = timestamp + max(EW11_RECOVERY_COOLDOWN, 60)
                 try:
                     log('[INFO] EW11 기기 재시작 시도')
                     await asyncio.wait_for(reset_EW11(), timeout=90)
@@ -1052,8 +1102,8 @@ async def ezville_loop(config):
                 finally:
                     restart_flag = True
 
-            # EW11_TIMEOUT이 길어도 복구 조건은 최대 60초마다 확인한다.
-            await asyncio.sleep(min(EW11_TIMEOUT, 60))
+            # Check packet freshness every five seconds; preserve recovery cooldown.
+            await asyncio.sleep(min(EW11_TIMEOUT, 5))
 
                                                 
     # Telnet 접속하여 EW11 리셋        
@@ -1071,11 +1121,11 @@ async def ezville_loop(config):
                 expect(b'Restart..')
         await bounded_call(reset, 30)
         log('[INFO] EW11 리셋 완료')
-        await asyncio.sleep(60)
+        # Recovery is verified by incoming valid packets; do not block health checks.
         
     # Addon 먹통 상태 감지 및 자동 리셋
     async def addon_health_loop():
-        nonlocal restart_flag
+        nonlocal restart_flag, next_session_recovery_time
         
         while True:
             timestamp = time.monotonic()
@@ -1084,12 +1134,13 @@ async def ezville_loop(config):
             # Unchanged but valid packets still prove that the bus is alive.
             time_since_activity = timestamp - last_valid_packet_time
             
-            if time_since_activity > HEALTH_CHECK_TIMEOUT:
+            if time_since_activity > HEALTH_CHECK_TIMEOUT and timestamp >= next_session_recovery_time:
+                next_session_recovery_time = timestamp + 60
                 log('[WARNING] Addon 먹통 감지: {}초 동안 유효 패킷 없음. 자동 리셋 트리거'.format(int(time_since_activity)))
                 log('[DEBUG] Last command time: {}, Last state update time: {}'.format(last_command_time, last_state_update_time))
                 restart_flag = True
                 await asyncio.sleep(0)
-            else:
+            elif time_since_activity <= HEALTH_CHECK_TIMEOUT and has_valid_packet:
                 if debug:
                     log('[DEBUG] Addon 상태 정상: 마지막 활동 이후 {:.1f}초 경과 (타임아웃: {}초)'.format(time_since_activity, HEALTH_CHECK_TIMEOUT))
             
@@ -1218,7 +1269,7 @@ async def ezville_loop(config):
         ADDON_STARTED = True
         log('[INFO] 장치 등록 및 상태 업데이트를 시작합니다')
         tasklist = [asyncio.create_task(coro) for coro in (
-            state_update_loop(), command_loop(), ew11_health_loop(),
+            state_update_loop(), command_loop(),
             addon_health_loop(), mqtt_health_loop(), diagnostic_heartbeat_loop(), packet_profile_loop(),
         )]
         if comm_mode == 'socket':
@@ -1243,6 +1294,7 @@ async def ezville_loop(config):
     session_loop.set_exception_handler(asyncio_exception_handler)
     for sig in (signal.SIGTERM, signal.SIGINT):
         session_loop.add_signal_handler(sig, shutdown.set)
+    ew11_health = asyncio.create_task(ew11_health_loop())
     heartbeat = asyncio.create_task(heartbeat_loop())
     stop_task = asyncio.create_task(shutdown.wait())
     delay = 1
@@ -1253,7 +1305,8 @@ async def ezville_loop(config):
             ADDON_STARTED = False
             mqtt_connected = False
             mqtt_disconnected_time = time.monotonic()
-            last_command_time = last_state_update_time = last_valid_packet_time = time.monotonic()
+            last_command_time = last_state_update_time = time.monotonic()
+            # Preserve actual last-valid-packet time across communication sessions.
             MSG_QUEUE = Queue(maxsize=1000)
             CMD_QUEUE = asyncio.Queue(maxsize=100)
             DEVICE_STATE, MSG_CACHE, DISCOVERY_LIST, RESIDUE = {}, {}, [], ''
@@ -1275,7 +1328,10 @@ async def ezville_loop(config):
                 mqtt_client.connect_async(config['mqtt_server'], port=config.get('mqtt_port', 1883))
                 mqtt_client.loop_start()
                 active = asyncio.create_task(session())
-                done, _ = await asyncio.wait([active, stop_task, heartbeat], return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait([active, stop_task, heartbeat, ew11_health], return_when=asyncio.FIRST_COMPLETED)
+                if ew11_health in done:
+                    ew11_health.result()
+                    raise RuntimeError("EW11 health task stopped")
                 if heartbeat in done:
                     heartbeat.result()
                     raise RuntimeError('process heartbeat stopped')
@@ -1309,7 +1365,7 @@ async def ezville_loop(config):
                 pass
             delay = min(delay * 2, 60)
     finally:
-        await cancel_tasks([heartbeat, stop_task])
+        await cancel_tasks([heartbeat, stop_task, ew11_health])
         for sig in (signal.SIGTERM, signal.SIGINT):
             session_loop.remove_signal_handler(sig)
         session_loop.set_exception_handler(previous_exception_handler)
