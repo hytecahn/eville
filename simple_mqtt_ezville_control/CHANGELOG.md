@@ -1,3 +1,11 @@
+## 0.0.20
+
+- Check checksum-valid EW11 traffic every 5 seconds; default soft reconnect after 30 seconds and EW11 reset after 45 seconds. Existing installations must set `ew11_timeout` to 45; saved options are not silently overwritten. Physical reset retries have a separate 120-second cooldown.
+- Preserve real packet age through session restarts. Run EW11 health/recovery at worker scope so a soft reconnect cannot cancel a physical reset. Corrupt raw traffic does not mark the bus healthy.
+- Reject elevator commands without valid traffic within 15 seconds; never replay rejected calls after recovery.
+- Publish and timestamp actual 33:01:43:01, 33:01:C3:03 and changed 33:01:81:03 frames at `ezville/elevator/evidence`, with request correlation. Group repeated same-direction sends within five seconds. Local observed 0x10 and C3 frames remain unverified evidence, not arrival notifications. Preserve the legacy 0x80 arrival topic and flag its unverified basis. Report no confirmed arrival after 180 seconds at `ezville/elevator/result`.
+- Add regression tests for corrupt-only traffic, reset survival across session restart, stale-call rejection and actual local packet variants.
+
 ## 0.0.19
 - Retry rejected EW11 status publications across communication sessions, independently of physical recovery retries.
 - Replace pending notifications with the latest observed state to avoid replaying stale offline events after recovery.

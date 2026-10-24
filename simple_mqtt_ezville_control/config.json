@@ -1,6 +1,6 @@
 {
   "name": "MQTT 기반 Simple EzVille Wallpad Control",
-  "version": "0.0.19",
+  "version": "0.0.20",
   "slug": "simple_mqtt_ezville_control",
   "url": "https://github.com/hytecahn/eville",
   "description": "MQTT 통신을 활용한 간단화된 EzVille 월패드 컨트롤러",
@@ -43,12 +43,14 @@
     "reboot_control": false,
     "reboot_delay": 300,
     "ew11_buffer_size": 128,
-    "ew11_timeout": 3600,
+    "ew11_timeout": 45,
     "diagnostic_log_file": "/share/simple_mqtt_ezville_control.log",
     "diagnostic_log_days": 90,
     "diagnostic_interval": 600,
     "watchdog_timeout": 120,
-    "mqtt_port": 1883
+    "mqtt_port": 1883,
+    "ew11_recovery_cooldown": 120,
+    "command_max_packet_age": 15
   },
   "schema": {
     "DEBUG_LOG": "bool",
@@ -77,11 +79,13 @@
     "reboot_control": "bool",
     "reboot_delay": "float",
     "ew11_buffer_size": "int",
-    "ew11_timeout": "float",
+    "ew11_timeout": "float(10,3600)",
     "diagnostic_log_file": "str",
     "diagnostic_log_days": "int(1,365)",
     "diagnostic_interval": "int(60,3600)",
     "watchdog_timeout": "int(30,600)",
-    "mqtt_port": "port"
+    "mqtt_port": "port",
+    "ew11_recovery_cooldown": "int(60,600)",
+    "command_max_packet_age": "int(5,60)"
   }
 }
