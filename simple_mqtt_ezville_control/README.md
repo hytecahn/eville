@@ -255,3 +255,25 @@ MQTT disconnection during offline/online publication, and subsequent recovery.
 Confirm HA recovery automations filter offline only and enforce their own
 cooldown and relay availability checks. Owner approval is required for merge
 and operational rollout. No production recovery has been exercised here.
+
+
+## Fast EW11 recovery and elevator evidence (0.0.20)
+
+For existing installations set `ew11_timeout: 45`, `ew11_recovery_cooldown: 120`,
+`command_max_packet_age: 15` and optionally `diagnostic_interval: 60`.
+Saved options are preserved by HA updates. Every five seconds, checksum-valid
+bus freshness is checked. After 30 seconds without valid frames, reconnect the
+add-on MQTT session; after 45 seconds, report offline and attempt EW11 Telnet
+reset. These thresholds are action deadlines, not guaranteed recovery times.
+Physical recovery persists across session cleanup. A valid received frame,
+not a restart, establishes recovery. HA offline-only relay recovery must keep
+its own cooldown and relay-availability guard.
+
+`ezville/elevator/evidence` records actual local 43/C3 and changed batch state
+packets with timestamps and a recent call request ID. The observed local
+`F733014301109716` / `F73301C30300040001F6` pair is not yet evidence of physical
+arrival. The historic `F7330143018007F6` notification remains compatible but
+is explicitly marked `arrival_verified: false`. Do not map a generic 0x43 or
+C3 packet to confirmed arrival. Correlate a controlled call with a human
+observation at the landing before changing the arrival rule. A three-minute
+unconfirmed result is not proof of failure; it means arrival was not verified.
