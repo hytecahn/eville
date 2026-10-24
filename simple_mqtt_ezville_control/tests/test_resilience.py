@@ -117,6 +117,66 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                         for t, p in c.publications if t == 'ezville/ew11/status']
             self.assertEqual(statuses, ['offline', 'online', 'offline'])
 
+    async def exercise_rejected_status(self, rejected_status, recover_before_accept=False):
+        self.config['ew11_timeout'] = .05
+        accepted, rejected = [], []
+        reject = True
+        original = FakeClient.publish
+
+        def publish(client, topic, payload, retain=False):
+            if topic == 'ezville/ew11/status':
+                status = json.loads(payload)['status']
+                if reject and status == rejected_status:
+                    rejected.append(status)
+                    return SimpleNamespace(rc=4)
+                accepted.append(status)
+            return original(client, topic, payload, retain)
+
+        async def healthy_bus():
+            while True:
+                FakeClient.instances[-1].emit('ew11/recv', bytes.fromhex(STATE))
+                await asyncio.sleep(.005)
+
+        packets = None
+        with patch.object(FakeClient, 'publish', publish), patch.object(
+                ezville.telnetlib, 'Telnet', side_effect=OSError('unreachable')) as reset:
+            try:
+                await self.start()
+                await self.wait_for(lambda: len(FakeClient.instances) >= 2)
+                if rejected_status == 'online':
+                    self.assertEqual(accepted, ['offline'])
+                    packets = asyncio.create_task(healthy_bus())
+                await self.wait_for(lambda: len(rejected) >= 2)
+                self.assertEqual(reset.call_count, 1)
+                if recover_before_accept:
+                    packets = asyncio.create_task(healthy_bus())
+                    await self.wait_for(lambda: accepted == ['online'])
+                reject = False
+                expected = ['offline', 'online'] if rejected_status == 'online' else (
+                    ['online'] if recover_before_accept else ['offline'])
+                await self.wait_for(lambda: accepted == expected)
+                await asyncio.sleep(.15)
+                self.assertEqual(accepted, expected)
+                self.assertEqual(reset.call_count, 1)
+                if rejected_status == 'online':
+                    packets.cancel()
+                    await asyncio.gather(packets, return_exceptions=True)
+                    packets = None
+                    await self.wait_for(lambda: accepted == ['offline', 'online', 'offline'])
+            finally:
+                if packets:
+                    packets.cancel()
+                    await asyncio.gather(packets, return_exceptions=True)
+
+    async def test_rejected_offline_retries_across_session_restart(self):
+        await self.exercise_rejected_status('offline')
+
+    async def test_rejected_online_retries_without_more_physical_recovery(self):
+        await self.exercise_rejected_status('online')
+
+    async def test_recovery_replaces_rejected_offline_with_latest_online(self):
+        await self.exercise_rejected_status('offline', recover_before_accept=True)
+
     async def test_split_frame_and_state_publication(self):
         client = await self.start()
         raw = bytes.fromhex(STATE)
@@ -332,3 +392,4 @@ class WatchdogTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
