@@ -111,6 +111,8 @@ class OperationsTests(unittest.TestCase):
                 {'entity_id': 'sensor.system_monitor_disk_free', 'state': state,
                  'attributes': {'unit_of_measurement': unit}}]})
             self.assertEqual(result['storage']['disk_free']['observation'], 'unavailable', (state, unit))
+        self.assertIsNone(ha.safe_number(True))
+        self.assertIsNone(ha.disk_measurement(True, 'GB'))
 
     def test_backup_times_must_be_rfc3339_and_invalid_text_is_hidden(self):
         result = ha.summarize_states({'observation': 'available', 'data': [
