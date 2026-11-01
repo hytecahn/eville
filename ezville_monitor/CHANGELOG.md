@@ -3,7 +3,8 @@
 ## 0.7.3
 
 - Aggregate regularly recurring fingerprint-only candidate windows into bounded, low-priority groups.
-- Preserve localized/count-change and rare variant candidates in the primary list; report grouped occurrence totals and examples.
+- Group only occurrences that share the recurring cadence and phase; preserve off-phase exceptions and localized/count-change candidates in the primary list.
+- Report grouped occurrence totals and examples without deleting original profile evidence.
 - Preserve passive collection and existing database format; issue no HA or device commands.
 
 ## 0.7.2

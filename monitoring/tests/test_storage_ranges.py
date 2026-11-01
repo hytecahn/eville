@@ -166,6 +166,19 @@ class StorageRangeTests(unittest.TestCase):
         self.assertEqual(len(primary), 5)
         self.assertEqual(groups, [])
 
+    def test_off_phase_rare_variant_occurrence_stays_primary_inside_periodic_run(self):
+        starts = sorted(list(range(0, 6600, 600)) + [3300])
+        items = [{'signature': '40:01:07:A5', 'candidate_signal': 'variant_only',
+                  'bucket_start': start, 'bucket_end': start + 300, 'count': 2,
+                  'control_before': 1, 'control_after': 1, 'same_slot_baseline_median': 2,
+                  'new_tracked_variants': 1, 'variant_changes': 0,
+                  'label': '미분류 패킷', 'category': 'unknown'} for start in starts]
+        primary, groups = packet_ranges.group_periodic_variant_candidates(items)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]['cadence_seconds'], 600)
+        self.assertEqual(groups[0]['occurrence_count'], 11)
+        self.assertEqual([item['bucket_start'] for item in primary], [3300])
+
     def test_equal_score_candidates_prefer_newer_window_over_old_high_volume(self):
         with tempfile.TemporaryDirectory() as name:
             db = Path(name) / 'data.sqlite'

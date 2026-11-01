@@ -30,56 +30,82 @@ def group_periodic_variant_candidates(candidates):
         items.sort(key=lambda item: item['bucket_start'])
         if len(items) < 5:
             continue
-        intervals = [items[index]['bucket_start'] - items[index - 1]['bucket_start']
-                     for index in range(1, len(items))]
-        cadence = None
-        regularity = 0
+        selected = None
         for period in range(1800, BUCKET_SECONDS - 1, -BUCKET_SECONDS):
-            multiples = [max(1, round(interval / period)) for interval in intervals]
-            aligned = [abs(interval - multiple * period) <= 120
-                       for interval, multiple in zip(intervals, multiples)]
-            current_cadence = sum(aligned) / len(aligned)
-            single_period = sum(ok and multiple == 1
-                                for ok, multiple in zip(aligned, multiples)) / len(aligned)
-            if current_cadence >= 0.8 and single_period >= 0.6:
-                cadence, regularity = period, current_cadence
-                break
-        if cadence is None:
+            # Fit a single modulo-period phase and group only members on that
+            # phase. A rare off-phase record must not be absorbed merely because
+            # most intervals around it look periodic.
+            phase_clusters = {}
+            for anchor in items:
+                anchor_time = anchor['bucket_start']
+                cluster = []
+                for item in items:
+                    remainder = (item['bucket_start'] - anchor_time) % period
+                    distance = min(remainder, period - remainder)
+                    if distance <= 120:
+                        cluster.append(item)
+                key = tuple(id(item) for item in cluster)
+                phase_clusters[key] = cluster
+            valid_clusters = []
+            for cluster in phase_clusters.values():
+                if len(cluster) < 5:
+                    continue
+                intervals = [cluster[index]['bucket_start'] - cluster[index - 1]['bucket_start']
+                             for index in range(1, len(cluster))]
+                multiples = [max(1, round(interval / period)) for interval in intervals]
+                aligned = [abs(interval - multiple * period) <= 120
+                           for interval, multiple in zip(intervals, multiples)]
+                regularity = sum(aligned) / len(aligned)
+                single_period = sum(ok and multiple == 1
+                                    for ok, multiple in zip(aligned, multiples)) / len(aligned)
+                if regularity >= 0.8 and single_period >= 0.6:
+                    valid_clusters.append((cluster, regularity))
+            if valid_clusters:
+                cluster, regularity = max(valid_clusters,
+                                          key=lambda value: (len(value[0]), value[1]))
+                option = (period, cluster, regularity)
+                if (selected is None or len(cluster) > len(selected[1])
+                        or (len(cluster) == len(selected[1]) and period < selected[0])
+                        or (len(cluster) == len(selected[1]) and period == selected[0]
+                            and regularity > selected[2])):
+                    selected = option
+        if selected is None:
             continue
+        cadence, periodic_items, regularity = selected
 
-        grouped_ids.update(id(item) for item in items)
+        grouped_ids.update(id(item) for item in periodic_items)
         # Keep a small, evenly spaced sample of the occurrence evidence. The
         # source profile rows remain available in the local archive.
-        sample_count = min(8, len(items))
-        sample_indexes = sorted({round(i * (len(items) - 1) / max(1, sample_count - 1))
+        sample_count = min(8, len(periodic_items))
+        sample_indexes = sorted({round(i * (len(periodic_items) - 1) / max(1, sample_count - 1))
                                  for i in range(sample_count)})
         examples = [{key: item[key] for key in (
             'bucket_start', 'bucket_end', 'count', 'control_before', 'control_after',
             'same_slot_baseline_median', 'new_tracked_variants', 'variant_changes')}
-            for index, item in enumerate(items) if index in sample_indexes]
+            for index, item in enumerate(periodic_items) if index in sample_indexes]
         groups.append({
-            'group_id': '{}:{}:{}'.format(signature, cadence, int(items[0]['bucket_start'])),
+            'group_id': '{}:{}:{}'.format(signature, cadence, int(periodic_items[0]['bucket_start'])),
             'signature': signature,
             'label': items[0]['label'],
             'category': items[0]['category'],
             'candidate_kind': 'periodic_variant_only',
             'priority': 'low',
             'grouping_reason': 'Fingerprint-only novelty recurs at a regular cadence; review as one pattern.',
-            'occurrence_count': len(items),
-            'first_bucket_start': items[0]['bucket_start'],
-            'last_bucket_end': items[-1]['bucket_end'],
+            'occurrence_count': len(periodic_items),
+            'first_bucket_start': periodic_items[0]['bucket_start'],
+            'last_bucket_end': periodic_items[-1]['bucket_end'],
             'cadence_seconds': cadence,
             'cadence_regularity': round(regularity, 3),
-            'count_min': min(item['count'] for item in items),
-            'count_max': max(item['count'] for item in items),
-            'count_median': sorted(item['count'] for item in items)[len(items) // 2],
-            'control_before_median': sorted(item['control_before'] for item in items)[len(items) // 2],
-            'control_after_median': sorted(item['control_after'] for item in items)[len(items) // 2],
-            'same_slot_baseline_median': sorted(item['same_slot_baseline_median'] for item in items)[len(items) // 2],
-            'new_variant_observations': sum(item['new_tracked_variants'] for item in items),
-            'variant_changes_total': sum(item['variant_changes'] for item in items),
+            'count_min': min(item['count'] for item in periodic_items),
+            'count_max': max(item['count'] for item in periodic_items),
+            'count_median': sorted(item['count'] for item in periodic_items)[len(periodic_items) // 2],
+            'control_before_median': sorted(item['control_before'] for item in periodic_items)[len(periodic_items) // 2],
+            'control_after_median': sorted(item['control_after'] for item in periodic_items)[len(periodic_items) // 2],
+            'same_slot_baseline_median': sorted(item['same_slot_baseline_median'] for item in periodic_items)[len(periodic_items) // 2],
+            'new_variant_observations': sum(item['new_tracked_variants'] for item in periodic_items),
+            'variant_changes_total': sum(item['variant_changes'] for item in periodic_items),
             'occurrence_examples': examples,
-            'occurrence_examples_truncated': len(examples) < len(items),
+            'occurrence_examples_truncated': len(examples) < len(periodic_items),
             'limitation': 'Five-minute profile associations; no event time or packet meaning established.'})
 
     groups.sort(key=lambda item: (-item['occurrence_count'], -item['last_bucket_end'], item['signature']))
