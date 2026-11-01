@@ -131,6 +131,16 @@ def poll_operations_if_enabled(options, token, executor=None, target_slug=''):
     return poll_operations(token, executor=executor, target_slug=target_slug)
 
 
+def poll_monitor_status(options, token, executor=None):
+    """Keep the original narrow Core/add-on health probe when wide collection is off."""
+    target_slug = options.get('target_slug', '') if isinstance(options, dict) else ''
+    operations = poll_operations_if_enabled(options, token, executor=executor,
+                                            target_slug=target_slug)
+    if operations is None:
+        return supervisor_status(target_slug, token), None
+    return operations_packet_status(operations, target_slug), operations
+
+
 def main():
     from archive import initialize, persist, serve
     options = json.loads(Path('/data/options.json').read_text())
@@ -167,13 +177,10 @@ def main():
         try:
             # HA operations calls run in a separate, bounded worker/cache so their
             # timeouts cannot delay packet-log cursor advancement.
-            operations = poll_operations_if_enabled(options, os.environ['SUPERVISOR_TOKEN'],
-                                                    target_slug=options.get('target_slug', ''))
+            status, operations = poll_monitor_status(options, os.environ['SUPERVISOR_TOKEN'])
             if operations is None:
-                status = {'core': {'observation': 'disabled'}, 'addon': {'observation': 'disabled'}}
                 operations_to_persist = None
             else:
-                status = operations_packet_status(operations, options.get('target_slug', ''))
                 operations_to_persist = operations if operations.get('revision', 0) > last_operations_persisted_revision else None
             batch = collect(db, options['log_path'], options['node_id'], time.time(), status=status,
                             operations=operations_to_persist)
