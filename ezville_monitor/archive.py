@@ -115,6 +115,48 @@ def handler(database, node, options=None):
                     daily_text = day_row[0] + '\n' + render_daily(json.loads(day_row[2]), max_calls=None, raw_samples=True)
                 else:
                     daily_text = day_row[0] + ' (' + day_row[1] + ')'
+                from packet_ranges import discover_candidates
+                # The HA-authenticated ingress can inspect samples that already
+                # exist in the local source log. Remote reads remain fingerprints only.
+                candidate_report = discover_candidates(database, node, time.time(), include_samples=True)
+                candidate_lines = [
+                    '후보 시각은 5분 프로파일 구간입니다. 정확한 행동 시각이나 패킷 의미를 확정하지 않습니다.',
+                    '지문은 원시 바이트가 아니므로 층수 같은 숫자값을 해독할 수 없습니다.',
+                    '완전한 관측 구간과 같은 시간대의 과거 기준선이 부족하면 후보 누락/오탐 가능성이 큽니다.',
+                    '관측 상태: {} · 완전한 프로파일 구간 {}개 · 불완전 프로파일 구간 {}개 '
+                    '· overflow 구간 {}개 · 누락 {}개 · 수집 공백 최대 {}초 · 잘림 {}'.format(
+                        '완전' if candidate_report['observation_complete'] else '불완전',
+                        candidate_report['complete_profile_buckets'], candidate_report['incomplete_profile_windows'],
+                        candidate_report['overflowed_profile_windows'], candidate_report['missing_profile_buckets'],
+                        candidate_report['collector_max_gap_seconds'],
+                        '있음' if candidate_report['truncated'] else '없음')]
+                candidate_lines.append('DB 행 검사 {}/{}개 · 일치 행 최소 {}개 · 오래된 생략 최소 {}개'.format(
+                    candidate_report['batches_scanned'], candidate_report['batch_scan_limit'],
+                    candidate_report['matching_rows_detected_at_least'],
+                    candidate_report['older_rows_omitted_at_least']))
+                candidate_lines.append('기준선 설정 최대 {}일, 최소 {}일 · 실제 후보별 기준선 일수는 각 항목에 따로 표시'.format(
+                    candidate_report['baseline_days_configured'], candidate_report['minimum_baseline_days_required']))
+                candidate_lines.append('발견 후보 {}개 · 화면에는 최대 20개 표시 · 제외 항목 {}'.format(
+                    candidate_report['candidate_total'],
+                    json.dumps(candidate_report['candidate_suppressed_counts'], ensure_ascii=False, sort_keys=True)))
+                if candidate_report['candidate_list_truncated']:
+                    candidate_lines.append('후보 응답 상한 50개에 도달해 일부 후보를 생략했습니다.')
+                for candidate in candidate_report['candidates'][:20]:
+                    start_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(candidate['bucket_start'] + 9 * 3600))
+                    end_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(candidate['bucket_end'] + 9 * 3600))
+                    candidate_lines.append(
+                        '프로파일 구간 {}–{} KST · {} · 현재 {} / 앞 {} / 뒤 {} · '
+                        '동일시각 실제 기준선 {}일/{}개 구간'.format(
+                            start_text, end_text, candidate['signature'], candidate['count'],
+                            candidate['control_before'], candidate['control_after'],
+                            candidate['same_slot_baseline_days_observed'],
+                            candidate['same_slot_baseline_buckets']))
+                    candidate_lines.append('이 시간대에 기억나는 행동이 있었나요? 확실하지 않으면 기억나지 않는다고 답해 주세요.')
+                    if candidate.get('raw_samples'):
+                        candidate_lines.append('HA 내부 기존 원문 표본(최대 3개): ' + ', '.join(candidate['raw_samples']))
+                if not candidate_report['candidates']:
+                    candidate_lines.append('현재 기준으로 표시할 수 있는 패턴 후보가 없습니다.')
+                candidate_text = '\n'.join(candidate_lines)
                 body = ('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
                     '<title>EzVille Monitor</title><style>body{font:16px system-ui;max-width:1000px;margin:30px auto;padding:20px;background:#101820;color:#eee}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#1e2b36;padding:20px;border-radius:12px}</style>'
                     '<h1>EzVille Monitor</h1><p>HA 내부 로그 보관 · 매주 월요일 08:00 한국 시간</p>'
@@ -126,7 +168,8 @@ def handler(database, node, options=None):
                        if options and options.get('daily_enabled') else '')
                     + '<h2>주간 수집 현황</h2><pre>'
                     + html.escape(json.dumps(result,ensure_ascii=False,indent=2)) + '</pre><h2>일일 보고</h2><pre>'
-                    + html.escape(daily_text) + '</pre><h2>최근 분석</h2><pre>'
+                    + html.escape(daily_text) + '</pre><h2>미해석 패킷 후보 · 최근 24시간</h2><pre>'
+                    + html.escape(candidate_text) + '</pre><h2>최근 분석</h2><pre>'
                     + html.escape(latest) + '</pre></html>').encode()
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')

@@ -43,15 +43,28 @@ def query(origin, key, endpoint, payload=None):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('endpoint',choices=['health','report','recent','daily','packets'])
+    p.add_argument('endpoint',choices=['health','report','recent','daily','packets','action-window','candidates'])
     p.add_argument('--start', type=int, help='Packet range start, Unix seconds')
     p.add_argument('--end', type=int, help='Packet range end, Unix seconds')
+    p.add_argument('--action', choices=['bell','door_open','elevator_arrival','elevator_location','other'])
+    p.add_argument('--at', type=float, help='Operator-reported action time, Unix seconds')
+    p.add_argument('--radius', type=int, default=120, help='Comparison window radius, 30–300 seconds')
+    p.add_argument('--hours', type=int, default=24, help='Candidate discovery window, 6–24 hours')
     p.add_argument('--origin',required=True)
     p.add_argument('--key-file',type=Path)
     p.add_argument('--check',action='store_true',help='Return freshness exit status without exposing telemetry in CI logs')
     a=p.parse_args()
     key = a.key_file.read_text().strip() if a.key_file else os.environ['EZVILLE_REMOTE_SECRET']
-    payload = {'start': a.start, 'end': a.end} if a.endpoint == 'packets' else None
+    if a.endpoint == 'packets':
+        payload = {'start': a.start, 'end': a.end}
+    elif a.endpoint == 'action-window':
+        if a.action is None or a.at is None:
+            p.error('action-window requires --action and --at')
+        payload = {'action': a.action, 'at': a.at, 'radius': a.radius}
+    elif a.endpoint == 'candidates':
+        payload = {'hours': a.hours}
+    else:
+        payload = None
     result=query(a.origin,key,a.endpoint,payload)
     if a.check:
         if a.endpoint != 'health':

@@ -278,7 +278,7 @@ scratch file working today does not prove future scheduled executions can access
 Report unavailable credentials/data as a blocked analysis, not as a healthy system.
 
 
-## Elevator labels, car-entry investigation and storage (Monitor 0.7.0)
+## Elevator labels, packet candidate discovery and storage (Monitor 0.7.1 candidate)
 
 The operator confirmed `33:01:43:01` and `33:01:C3:03` as elevator-call-related
 traffic. Reports identify them as elevator call/arrival-related signal and call
@@ -303,6 +303,43 @@ exception if that configuration otherwise excludes this endpoint.
 `monitoring/read_remote.py packets --origin <HTTPS-origin> --start <epoch> --end
 <epoch>` uses the same read key and response signature checks as other reads.
 No read key grants actuation rights.
+
+The Monitor 0.7.1 candidate adds `미해석 패킷 후보 · 최근 24시간` to the existing
+HA-authenticated ingress dashboard (`/` via **Open Web UI**). It compares candidate
+5-minute profiles with neighboring buckets and up to seven prior same-KST-time
+windows, requiring at least six complete same-time baselines. Steady high-volume
+profiles alone are suppressed. The page displays bucket ranges, adjacent counts,
+baseline coverage, and a neutral question about remembered activity. A bucket is
+complete only when its leading `PACKET_WINDOW` agrees with the unique profile count
+and total frames and no `PACKET_OVERFLOW` occurred. Missing, partial, conflicting,
+overflowed or truncated windows cannot establish zero historical traffic; candidates
+are suppressed when the current 24-hour profile coverage is incomplete. The configured
+seven-day baseline horizon is distinct from each candidate's actually observed
+complete same-time windows. It also shows
+up to three raw examples already present in each source profile for local review;
+no new bytes are collected or retained. The signed `/v1/candidates` route returns
+the same bounded candidates without raw examples. `/v1/action-window` compares a
+reported event time with nearby profiles and waits through the flush and collector
+delay of the final intersecting bucket. Neither route controls HA or devices.
+
+The producer retains only eight SHA-256 fingerprints per signature per bucket;
+fingerprints cannot be decoded into floor/location values. Existing profile raw
+examples can be compared against repeated, operator-confirmed locations, but at most
+three examples per bucket may miss values. Exact floor decoding needs repeated raw
+samples tied to independently known floors; no new retention or API key is required
+for the current local Ingress view. Collector/profile gaps and incomplete same-time
+baselines must be checked before interpreting an empty result.
+
+The signed read-only `POST /v1/action-window` supports follow-up analysis after an
+operator reports an approximate action time. Use
+`monitoring/read_remote.py action-window --origin <HTTPS-origin> --action bell|door_open|elevator_arrival|elevator_location|other --at <epoch>`;
+`--radius` is optional (30–300 seconds, default 120). The response returns bounded
+signatures, counts, fingerprints and collection/profile coverage fields, never raw
+packet samples. The reported label and nearby profiles remain a hypothesis. Compare
+multiple action windows with control windows before classifying a pattern. Five-minute
+bucket counts may overlap the requested interval; missing source or packet-profile
+windows limit negative conclusions. This endpoint is read-only and has no HA or
+device control path.
 
 EW11 0.0.16 also accepts `car_entry` on its existing `<HA_TOPIC>/packet/mark`
 MQTT topic (default `ezville/packet/mark`). Publish this observation label when
