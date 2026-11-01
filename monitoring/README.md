@@ -105,6 +105,16 @@ mobile notification action. Daily reports remain on HA in `/data/telemetry.sqlit
 are not returned by the public read-only API. A failed delivery is retried after an hour;
 interrupted `running` reports need manual inspection to avoid duplicate phone pushes.
 
+## HA operations snapshot (opt-in remote read endpoint)
+
+The Monitor stores a privacy-minimized Home Assistant operations summary in its existing persistent SQLite archive. A separate worker samples at most 50 log rows every 15 minutes with one worker and a seven-second caller wait budget; packet log cursor collection does not wait for a slow operations request. The cache persists with each telemetry batch and restores after restart. The authenticated `POST /v1/operations` endpoint exposes status, last attempt/success/error, and data age.
+
+The current manifest already declares `homeassistant_api: true`, `hassio_api: true`, and `hassio_role: default`; this change does not enlarge permissions. Core 2026.10.4 source shows `system_log/list` and `repairs/list_issues` are WebSocket commands; `system_log/list` is admin-only. `persistent_notification/get` is WebSocket-only. This addon has no evidenced Core WebSocket proxy, so those fields are explicitly unsupported until a validated transport exists. Core REST `/states` is used only to select exact backup-sensor and disk-sensor IDs; attributes, notification text, and all other entities are discarded. Backup timestamps and manager state are included when sensors exist; attempt outcome is unavailable because the richer `backup/info` WebSocket command is admin-only. Timestamps do not prove successful restoration.
+
+Supervisor endpoints are fixed to an internal host and static paths, GET-only, redirect-disabled, one-second per-request timeout, one-megabyte response cap, and explicit response status parsing. Add-on probes use a fixed slug allowlist. Update names are allowlisted identifiers. No raw log lines, settings, credentials, person/presence, location, voice, or account data enter the summary. Missing schemas and denied permissions remain unavailable; endpoint compatibility beyond the Core 2026.10.4 fixtures remains subject to HA installation validation. The Shelly adapter and external credentials remain disabled and unconfigured.
+
+The existing signed read key is used only if remote access was already configured. This code does not enable remote access, add keys, adjust routes, expand roles, or deploy the add-on. API state does not establish physical device operation or backup restorability; HA UI remains necessary for detailed diagnosis, repairs and visual verification.
+
 ## Weekly job
 
 Each Monday at **08:00 Asia/Seoul**, the local worker obtains the public master sources,
