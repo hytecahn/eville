@@ -24,4 +24,5 @@ jobs:
           -v "$PWD/monitoring/tests:/repo/monitoring/tests:ro"
           -v "$PWD/monitoring/read_remote.py:/repo/monitoring/read_remote.py:ro"
           -v "$PWD/monitoring/run_daily_remote.py:/repo/monitoring/run_daily_remote.py:ro"
+          -v "$PWD/ezville_monitor:/repo/ezville_monitor:ro"
           ezville-monitor-test -m unittest discover -s /repo/monitoring/tests -v
