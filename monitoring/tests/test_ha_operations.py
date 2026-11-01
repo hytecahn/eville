@@ -196,9 +196,16 @@ class OperationsTests(unittest.TestCase):
             '/addons/8a83e751_ezville_monitor/info',
             '/addons/8a83e751_simple_mqtt_ezville_control/info'])
 
+    def test_sections_distinguish_not_attempted_from_unavailable(self):
+        result = ha.collect('t', deadline=time.monotonic() - 1, target_slug='')
+        self.assertTrue(all(not section['attempted'] for section in result['sections'].values()))
+        self.assertEqual(result['sections']['core_logs']['observation'], 'timeout')
+        self.assertEqual(result['sections']['addons']['observation'], 'unavailable')
+        self.assertEqual(result['addons']['unattempted_count'], 1)
+
     def test_packet_status_is_derived_from_operations_cache(self):
         status = collector.operations_packet_status({'summary': {
-            'sections': {'core_info': 'available'}, 'core': {'version': '2026.10.4'},
+            'sections': {'core_info': {'attempted': True, 'observation': 'available'}}, 'core': {'version': '2026.10.4'},
             'addons': {'observation': 'partial', 'addons': [
                 {'slug': 'configured_controller', 'info': {'observation': 'available',
                                                             'state': 'started', 'version': '1.2'}}]}}},
