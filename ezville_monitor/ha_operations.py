@@ -36,7 +36,7 @@ SUPERVISOR_PATHS = {'/core/info', '/supervisor/info', '/os/info', '/host/info', 
 ADDON_PATH = re.compile(r'^/addons/[a-z0-9_]{1,64}/info$')
 MONITOR_ADDON_SLUG = '8a83e751_ezville_monitor'
 _CACHE_LOCK = threading.Lock()
-_CACHE = {'summary': None, 'last_attempt_at': None, 'last_success_at': None,
+_CACHE = {'schema': 2, 'summary': None, 'last_attempt_at': None, 'last_success_at': None,
           'last_error': None, 'running': False, 'revision': 0}
 _WORKER_STARTED_MONOTONIC = None
 _WORKER_GENERATION = 0
@@ -93,6 +93,22 @@ def disk_measurement(value, unit, percent=False):
     if not math.isfinite(byte_count) or byte_count > 2**63 - 1:
         return None
     return {'bytes': int(byte_count)}
+
+
+def compact_host(result):
+    """Export only validated host disk values; Supervisor reports these in GiB."""
+    if result.get('observation') != 'available':
+        return {'observation': result.get('observation', 'unavailable'),
+                'attempted': result.get('attempted', False)}
+    data = result.get('data')
+    if not isinstance(data, dict):
+        return {'observation': 'unavailable', 'attempted': result.get('attempted', True)}
+    summary = {'observation': 'available', 'attempted': result.get('attempted', True)}
+    for key in ('disk_total', 'disk_free'):
+        measurement = disk_measurement(data.get(key), 'GiB')
+        if measurement is not None:
+            summary[key + '_bytes'] = measurement['bytes']
+    return summary
 
 
 def operations_options(options):
@@ -622,10 +638,7 @@ def collect(token, previous=None, deadline=None, request_fn=None, target_slug=''
                     'attempted': state_summary.get('attempted', False),
                     'disk_sensors': state_summary.get('storage', {}),
                     'fields_observed': state_summary.get('storage_fields_observed', [])},
-        'host': ({'observation': 'available', 'attempted': host.get('attempted', True)} |
-                 {k + '_bytes': int(value) for k in ('disk_total', 'disk_free')
-                  if (value := safe_number(host.get('data', {}).get(k))) is not None})
-                if host['observation'] == 'available' else {'observation': host['observation'], 'attempted': host.get('attempted', False)},
+        'host': compact_host(host),
         'resolution': list_summary(resolution, 'unhealthy', 'unhealthy_count'),
         'limitations': ['Collected API state does not prove physical device operation or backup restorability.',
                         'Only Monitor and the configured target add-on are checked; other add-ons are unmonitored.',
