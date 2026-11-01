@@ -54,7 +54,7 @@ def collect(db, log_path, node, now, max_batches=1000, status=None, operations=N
                 break
         batch = {'schema': 1, 'id': str(uuid.uuid4()), 'node': node,
                  'collected_at': now, 'events': events, 'operations': operations,
-                 'operations_collected_at': (operations or {}).get('last_success_at')}
+                 'operations_collected_at': (operations or {}).get('last_attempt_at')}
         # Heartbeat denotes collector health only, never successful device operation.
         batch['events'].append({'kind': 'collector_heartbeat', 'at': now,
                                 'source_exists': Path(log_path).is_file(),
@@ -111,7 +111,7 @@ def main():
     threading.Thread(target=worker, args=(database, options, stop), daemon=True).start()
     from ha_operations import cached_status, poll_operations, restore_cache
     restore_cache(db, options['node_id'])
-    last_operations_persisted_at = cached_status().get('last_attempt_at')
+    last_operations_persisted_revision = cached_status().get('revision', 0)
     operations_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ha-operations')
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -119,15 +119,16 @@ def main():
         full = False
         try:
             status = supervisor_status(options['target_slug'], os.environ['SUPERVISOR_TOKEN'])
-            # HA operations runs separately with a bounded wait, so its API delays
-            # cannot block packet log cursor advancement.
-            operations = poll_operations(os.environ['SUPERVISOR_TOKEN'], executor=operations_executor)
-            operations_to_persist = operations if operations.get('last_attempt_at') != last_operations_persisted_at else None
-            if operations_to_persist is not None:
-                last_operations_persisted_at = operations.get('last_attempt_at')
+            # HA operations calls run in a separate worker/cache; packet cursor advancement
+            # submits work and never waits for the HA request to finish.
+            operations = poll_operations(os.environ['SUPERVISOR_TOKEN'], executor=operations_executor,
+                                         target_slug=options.get('target_slug', ''))
+            operations_to_persist = operations if operations.get('revision', 0) > last_operations_persisted_revision else None
             batch = collect(db, options['log_path'], options['node_id'], time.time(), status=status,
                             operations=operations_to_persist)
             persist(db, options['retention_days'], options['max_storage_mb'])
+            if operations_to_persist is not None:
+                last_operations_persisted_revision = operations_to_persist.get('revision', last_operations_persisted_revision)
             full = len(batch['events']) >= 33
         except Exception as error:
             print('collection: {}'.format(type(error).__name__), flush=True)
