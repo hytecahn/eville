@@ -122,11 +122,14 @@ def handler(database, node, options=None):
                 candidate_lines = [
                     '후보 시각은 5분 프로파일 구간입니다. 정확한 행동 시각이나 패킷 의미를 확정하지 않습니다.',
                     '지문은 원시 바이트가 아니므로 층수 같은 숫자값을 해독할 수 없습니다.',
-                    '완전한 관측 구간과 같은 시간대의 과거 기준선이 부족하면 후보 누락/오탐 가능성이 큽니다.',
-                    '관측 상태: {} · 완전한 프로파일 구간 {}개 · 불완전 프로파일 구간 {}개 '
+                    '전체 24시간 상태가 불완전해도 후보의 현재·양옆 구간과 실제 비교 기준선이 충분하면 그 후보만 표시할 수 있습니다. '
+                    '불완전 구간은 0회로 간주하지 않습니다.',
+                    '현재 24시간 관측: {} · 완전한 프로파일 구간 {}개 · 현재 불완전 {}개 · 과거 기준 구간 불완전 {}개 '
                     '· overflow 구간 {}개 · 누락 {}개 · 수집 공백 최대 {}초 · 잘림 {}'.format(
                         '완전' if candidate_report['observation_complete'] else '불완전',
-                        candidate_report['complete_profile_buckets'], candidate_report['incomplete_profile_windows'],
+                        candidate_report['complete_profile_buckets'],
+                        candidate_report['current_incomplete_profile_windows'],
+                        candidate_report['historical_incomplete_profile_windows'],
                         candidate_report['overflowed_profile_windows'], candidate_report['missing_profile_buckets'],
                         candidate_report['collector_max_gap_seconds'],
                         '있음' if candidate_report['truncated'] else '없음')]
@@ -144,6 +147,13 @@ def handler(database, node, options=None):
                 for candidate in candidate_report['candidates'][:20]:
                     start_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(candidate['bucket_start'] + 9 * 3600))
                     end_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(candidate['bucket_end'] + 9 * 3600))
+                    if candidate.get('episode_bucket_count', 1) > 1:
+                        episode_start = time.strftime('%Y-%m-%d %H:%M:%S',
+                            time.gmtime(candidate['episode_bucket_start'] + 9 * 3600))
+                        episode_end = time.strftime('%Y-%m-%d %H:%M:%S',
+                            time.gmtime(candidate['episode_bucket_end'] + 9 * 3600))
+                        candidate_lines.append('연속 신규 서명 에피소드 {}–{} KST · {}개 버킷 · 지속 트래픽일 수 있으며 개별 행동으로 보지 않습니다.'.format(
+                            episode_start, episode_end, candidate['episode_bucket_count']))
                     candidate_lines.append(
                         '프로파일 구간 {}–{} KST · {} · 현재 {} / 앞 {} / 뒤 {} · '
                         '동일시각 실제 기준선 {}일/{}개 구간'.format(

@@ -87,7 +87,7 @@ def read(database, node, start, end, now):
                             budget += length
                     except (ValueError, TypeError, KeyError):
                         malformed += 1
-    checkpoints = [start] + sorted(set(beats)) + [end]
+    checkpoints = [start] + sorted(set(at for at in beats if start <= at < end)) + [end]
     gap = max(b - a for a, b in zip(checkpoints, checkpoints[1:]))
     packet_checkpoints = [start] + sorted(set(windows)) + [end]
     packet_gap = max(b - a for a, b in zip(packet_checkpoints, packet_checkpoints[1:]))
@@ -151,7 +151,8 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
     history_start = start - 7 * 86400
     by_bucket = {}
     window_meta, window_identity, overflow_counts = {}, {}, {}
-    bad_buckets, beats, gaps, malformed, truncated = set(), [], 0, 0, False
+    bad_buckets, beats, gap_buckets, gaps, malformed, truncated = set(), [], set(), 0, 0, False
+    unlocalized_malformed_current = 0
     active_window_bucket = None
     with sqlite3.connect('file:' + str(database) + '?mode=ro', uri=True) as db:
         rows = db.execute(
@@ -169,14 +170,20 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
                 events = json.loads(body)['events']
             except (ValueError, TypeError, KeyError):
                 malformed += 1
+                if start <= collected < end:
+                    unlocalized_malformed_current += 1
                 continue
             for event in events:
                 if event.get('kind') == 'collector_heartbeat':
+                    beats.append(collected)
                     if start <= collected < end:
-                        beats.append(collected)
-                        gaps += not event.get('source_exists', False)
+                        if not event.get('source_exists', False):
+                            gaps += 1
+                            gap_buckets.add(int(collected // BUCKET_SECONDS) * BUCKET_SECONDS)
                 elif event.get('kind') == 'gap':
-                    gaps += start <= collected < end
+                    if start <= collected < end:
+                        gaps += 1
+                        gap_buckets.add(int(collected // BUCKET_SECONDS) * BUCKET_SECONDS)
                 elif event.get('kind') != 'log':
                     continue
                 line = event.get('text', '')
@@ -240,6 +247,7 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
                         if existing is not None:
                             if existing['record_identity'] != record_identity:
                                 malformed += 1
+                                bad_buckets.add(bucket)
                             continue
                         bucket_profiles[signature] = {
                             'count': count, 'changes': changes, 'variants': set(variants),
@@ -260,30 +268,67 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
         if (bucket not in bad_buckets and overflow_counts.get(bucket, 0) == 0
                 and len(profiles) == meta['signatures'] and actual_total == meta['total']):
             complete_windows.add(bucket)
+    # Build contiguous positive-count signature episodes once. The candidate
+    # loop visits every bucket/signature pair; walking each episode in both
+    # directions there makes steady traffic quadratic in the scan horizon.
+    episode_ranges = {}
+    for bucket in sorted(complete_windows):
+        for sig, profile in by_bucket.get(bucket, {}).items():
+            if profile['count'] <= 0:
+                continue
+            prior = by_bucket.get(bucket - BUCKET_SECONDS, {}).get(sig)
+            if bucket - BUCKET_SECONDS in complete_windows and prior and prior['count'] > 0:
+                continue
+            run_end = bucket + BUCKET_SECONDS
+            while run_end in complete_windows:
+                following_profile = by_bucket.get(run_end, {}).get(sig)
+                if not following_profile or following_profile['count'] <= 0:
+                    break
+                run_end += BUCKET_SECONDS
+            run = (bucket, run_end, (run_end - bucket) // BUCKET_SECONDS)
+            for member in range(bucket, run_end, BUCKET_SECONDS):
+                episode_ranges[(sig, member)] = run
     incomplete_profile_windows = len(observed_window_buckets - complete_windows)
     complete_buckets = sorted(bucket for bucket in complete_windows if start <= bucket < end)
     missing = []
     for bucket in range(start, end, BUCKET_SECONDS):
         if bucket not in complete_windows:
             missing.append(bucket)
-    checkpoints = [start] + sorted(set(beats)) + [end]
+    checkpoints = [start] + sorted(set(at for at in beats if start <= at < end)) + [end]
     heartbeat_gap = max((b - a for a, b in zip(checkpoints, checkpoints[1:])), default=end - start)
-    coverage_ok = (len(complete_buckets) >= MIN_BASELINE_BUCKETS
-                   and not gaps and not malformed and not truncated
-                   and not missing and incomplete_profile_windows == 0
-                   and bool(beats) and heartbeat_gap <= 180)
+    current_window_complete = (len(complete_buckets) == hours * 3600 // BUCKET_SECONDS
+                               and not gaps and not unlocalized_malformed_current
+                               and not missing and bool(beats) and heartbeat_gap <= 180
+                               and not truncated)
+    historical_incomplete = sum(history_start <= bucket < start
+                                for bucket in observed_window_buckets - complete_windows)
+    current_incomplete = sum(start <= bucket < end
+                             for bucket in observed_window_buckets - complete_windows)
     candidates = []
     filtered = {'incomplete_observation_window': 0, 'incomplete_neighbor_windows': 0, 'insufficient_same_slot_baseline': 0,
                 'no_anomaly': 0, 'fingerprint_cap_variation_suppressed': 0,
-                'known_non_elevator_traffic': 0, 'scan_truncated': 0}
+                'known_non_elevator_traffic': 0, 'scan_truncated': 0,
+                'sustained_episode_duplicate': 0}
     for bucket in complete_buckets:
         current = by_bucket.get(bucket, {})
         previous, following = by_bucket.get(bucket - BUCKET_SECONDS, {}), by_bucket.get(bucket + BUCKET_SECONDS, {})
-        if not coverage_ok:
+        if truncated:
+            filtered['scan_truncated'] += 1
+            continue
+        if unlocalized_malformed_current:
             filtered['incomplete_observation_window'] += 1
             continue
-        if truncated or bucket - BUCKET_SECONDS not in complete_windows or bucket + BUCKET_SECONDS not in complete_windows:
-            filtered['scan_truncated' if truncated else 'incomplete_neighbor_windows'] += 1
+        if bucket - BUCKET_SECONDS not in complete_windows or bucket + BUCKET_SECONDS not in complete_windows:
+            filtered['incomplete_neighbor_windows'] += 1
+            continue
+        local_start, local_end = bucket - BUCKET_SECONDS, bucket + 2 * BUCKET_SECONDS
+        local_beats = sorted(set(at for at in beats if local_start <= at <= local_end))
+        local_checkpoints = [local_start] + local_beats + [local_end]
+        local_heartbeat_gap = max((b - a for a, b in zip(local_checkpoints, local_checkpoints[1:])),
+                                  default=local_end - local_start)
+        if (gap_buckets.intersection((bucket - BUCKET_SECONDS, bucket, bucket + BUCKET_SECONDS))
+                or local_heartbeat_gap > 180):
+            filtered['incomplete_observation_window'] += 1
             continue
         signatures = set(current) | set(previous) | set(following)
         for sig in signatures:
@@ -314,7 +359,13 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
             if historical_presence < MIN_BASELINE_BUCKETS or truncated:
                 filtered['insufficient_same_slot_baseline'] += 1
                 continue
-            is_new = cur is not None and historical_presence >= MIN_BASELINE_BUCKETS and not any(historical_counts)
+            never_seen_at_same_time = cur is not None and cur['count'] > 0 and not any(historical_counts)
+            episode = episode_ranges.get((sig, bucket)) if never_seen_at_same_time else None
+            run_start, run_end, run_buckets = episode if episode else (bucket, bucket + BUCKET_SECONDS, 0)
+            if never_seen_at_same_time and episode and bucket != run_start:
+                filtered['sustained_episode_duplicate'] += 1
+                continue
+            is_new = never_seen_at_same_time and episode is not None
             spike_floor = max(4, local_control * 4, median_count * 4, median_count + 3)
             spike = current_count >= spike_floor and current_count > local_control and current_count > median_count
             adjacent_variants = (prev['variants'] if prev else set()) | (nxt['variants'] if nxt else set())
@@ -324,6 +375,7 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
                          (novel_variants > 0 or (changed and cur['changes'] >= max(3, median_changes * 3 + 2))))
             if cap_hit and (novel_variants > 0 or changed):
                 filtered['fingerprint_cap_variation_suppressed'] += 1
+            sustained_new = is_new and run_buckets > 1
             if not (is_new or spike or variation):
                 filtered['no_anomaly'] += 1
                 continue
@@ -338,18 +390,42 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
                 'signature': sig,
                 'label': item.get('label', '미분류 패킷'), 'category': item.get('category', 'unknown'),
                 'classification_basis': item.get('classification_basis', 'structural_profile_candidate'),
-                'candidate_kind': 'new_signature' if is_new else 'local_rate_or_variant_change',
+                'candidate_kind': ('sustained_new_signature_episode' if sustained_new else
+                                   'new_signature' if is_new else 'local_rate_or_variant_change'),
                 'count': current_count, 'control_before': prev['count'] if prev else 0,
                 'control_after': nxt['count'] if nxt else 0,
                 'same_slot_baseline_buckets': historical_presence,
                 'same_slot_baseline_days_observed': historical_presence,
                 'baseline_days_configured': 7,
                 'same_slot_baseline_median': median_count,
+                'same_slot_baseline_complete': historical_presence >= MIN_BASELINE_BUCKETS,
                 'new_tracked_variants': novel_variants,
                 'fingerprint_cap_hit': cap_hit,
                 'variant_changes': cur['changes'] if cur else 0, 'score': score,
-                'observation_complete': coverage_ok,
+                'observation_complete': bool(bucket - BUCKET_SECONDS in complete_windows
+                                             and bucket in complete_windows
+                                             and bucket + BUCKET_SECONDS in complete_windows
+                                             and local_heartbeat_gap <= 180
+                                             and not gap_buckets.intersection((bucket - BUCKET_SECONDS,
+                                                                               bucket,
+                                                                               bucket + BUCKET_SECONDS))
+                                             and not unlocalized_malformed_current and not truncated),
+                'candidate_evidence_complete': (historical_presence >= MIN_BASELINE_BUCKETS
+                                                and bucket - BUCKET_SECONDS in complete_windows
+                                                and bucket in complete_windows
+                                                and bucket + BUCKET_SECONDS in complete_windows
+                                                and local_heartbeat_gap <= 180
+                                                and not gap_buckets.intersection((bucket - BUCKET_SECONDS,
+                                                                                  bucket,
+                                                                                  bucket + BUCKET_SECONDS))),
                 'limitation': '5-minute profile association only; no exact action time or meaning established.'}
+            if sustained_new:
+                candidate['episode_bucket_start'] = window_meta[run_start]['start']
+                candidate['episode_bucket_end'] = window_meta[run_end - BUCKET_SECONDS]['end']
+                candidate['episode_bucket_count'] = run_buckets
+                candidate['episode_id'] = '{}:{}'.format(sig, int(window_meta[run_start]['start']))
+                candidate['limitation'] = ('Sustained new signature consolidated into one episode; this is not evidence '
+                                           'of a discrete action or exact event time.')
             if include_samples:
                 candidate['raw_samples'] = list(cur['samples']) if cur else []
             candidates.append(candidate)
@@ -365,7 +441,10 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
             'missing_profile_buckets': len(missing), 'source_missing_or_gaps': gaps,
             'collector_max_gap_seconds': round(heartbeat_gap),
             'malformed_records': malformed, 'truncated': truncated,
-            'observation_complete': coverage_ok and not missing,
+            'observation_complete': current_window_complete,
+            'current_window_complete': current_window_complete,
+            'current_incomplete_profile_windows': current_incomplete,
+            'historical_incomplete_profile_windows': historical_incomplete,
             'baseline_days_configured': 7,
             'minimum_baseline_days_required': MIN_BASELINE_BUCKETS,
             'incomplete_profile_windows': incomplete_profile_windows,

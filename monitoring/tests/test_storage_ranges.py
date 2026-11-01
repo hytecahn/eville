@@ -37,6 +37,15 @@ class StorageRangeTests(unittest.TestCase):
         conn.execute('INSERT INTO batches VALUES (?,?,?)',
                      ('home', bucket + 301, json.dumps({'events': events})))
 
+    def add_conflicting_duplicate_profile(self, conn, bucket, signature, count):
+        profile = {'signature': signature, 'known': False, 'count': count,
+                   'first': bucket + 10, 'last': bucket + 280, 'bucket_start': bucket,
+                   'variants': {'b' * 32: count}, 'other_variant_count': 0,
+                   'variant_changes': 0, 'samples': ['F799010203BB']}
+        event = {'kind': 'log', 'text': '[PACKET_PROFILE] ' + json.dumps(profile)}
+        conn.execute('INSERT INTO batches VALUES (?,?,?)',
+                     ('home', bucket + 302, json.dumps({'events': [event]})))
+
     def add_complete_current_coverage(self, conn, now, excluded=()):
         end = int(now // 300) * 300
         start = end - 24 * 3600
@@ -156,6 +165,144 @@ class StorageRangeTests(unittest.TestCase):
             self.assertFalse(result['observation_complete'])
             self.assertEqual(result['overflowed_profile_windows'], 1)
             self.assertFalse(any(item['bucket_start'] == target for item in result['candidates']))
+
+    def test_unrelated_incomplete_historical_bucket_does_not_suppress_complete_local_candidate(self):
+        with tempfile.TemporaryDirectory() as name:
+            db = Path(name) / 'data.sqlite'
+            now = 8 * 86400 + 12 * 3600
+            target = int(now // 300) * 300 - 600
+            with sqlite3.connect(db) as conn:
+                conn.execute('CREATE TABLE batches (node, collected, body)')
+                self.add_complete_current_coverage(conn, now, (target - 300, target, target + 300))
+                for day in range(1, 8):
+                    prior = target - day * 86400
+                    if day == 7:
+                        self.add_incomplete_window(conn, prior)
+                    else:
+                        self.add_profile_window(conn, 'home', prior, '99:01:02:00', 5)
+                for bucket, count in ((target - 300, 5), (target, 100), (target + 300, 5)):
+                    self.add_profile_window(conn, 'home', bucket, '99:01:02:00', count)
+            result = packet_ranges.discover_candidates(db, 'home', now)
+            candidate = next((item for item in result['candidates'] if item['bucket_start'] == target), None)
+            self.assertIsNotNone(candidate, 'unrelated historical incompleteness should not block local evidence')
+            self.assertEqual(candidate['same_slot_baseline_buckets'], 6)
+            self.assertTrue(result['current_window_complete'])
+            self.assertGreater(result['incomplete_profile_windows'], 0)
+
+    def test_unrelated_current_gap_does_not_suppress_candidate_with_complete_local_evidence(self):
+        with tempfile.TemporaryDirectory() as name:
+            db = Path(name) / 'data.sqlite'
+            now = 8 * 86400 + 12 * 3600
+            target = int(now // 300) * 300 - 600
+            unrelated = target - 6 * 3600
+            with sqlite3.connect(db) as conn:
+                conn.execute('CREATE TABLE batches (node, collected, body)')
+                self.add_complete_current_coverage(conn, now, (target - 300, target, target + 300, unrelated))
+                for day in range(1, 8):
+                    self.add_profile_window(conn, 'home', target - day * 86400, '99:01:02:00', 5)
+                for bucket, count in ((target - 300, 5), (target, 100), (target + 300, 5)):
+                    self.add_profile_window(conn, 'home', bucket, '99:01:02:00', count)
+            result = packet_ranges.discover_candidates(db, 'home', now)
+            candidate = next((item for item in result['candidates'] if item['bucket_start'] == target), None)
+            self.assertIsNotNone(candidate)
+            self.assertFalse(result['current_window_complete'])
+            self.assertFalse(result['observation_complete'])
+            self.assertTrue(candidate['candidate_evidence_complete'])
+            self.assertEqual(result['missing_profile_buckets'], 1)
+
+    def test_sustained_new_signature_is_consolidated_as_one_episode(self):
+        with tempfile.TemporaryDirectory() as name:
+            db = Path(name) / 'data.sqlite'
+            now = 8 * 86400 + 12 * 3600
+            target = int(now // 300) * 300 - 600
+            signature = '99:01:02:00'
+            with sqlite3.connect(db) as conn:
+                conn.execute('CREATE TABLE batches (node, collected, body)')
+                self.add_complete_current_coverage(conn, now, (target - 300, target, target + 300))
+                for bucket in (target - 300, target, target + 300):
+                    for day in range(1, 8):
+                        self.add_profile_window(conn, 'home', bucket - day * 86400, signature, 0)
+                for bucket in (target - 300, target, target + 300):
+                    self.add_profile_window(conn, 'home', bucket, signature, 100)
+            result = packet_ranges.discover_candidates(db, 'home', now)
+            sustained = [item for item in result['candidates'] if item['signature'] == signature]
+            self.assertEqual(len(sustained), 1)
+            self.assertEqual(sustained[0]['candidate_kind'], 'sustained_new_signature_episode')
+            self.assertEqual(sustained[0]['episode_bucket_count'], 3)
+            self.assertEqual(sustained[0]['episode_bucket_start'], target - 300)
+            self.assertEqual(sustained[0]['episode_bucket_end'], target + 600)
+
+    def test_isolated_new_signature_remains_a_single_bucket_candidate(self):
+        with tempfile.TemporaryDirectory() as name:
+            db = Path(name) / 'data.sqlite'
+            now = 8 * 86400 + 12 * 3600
+            target = int(now // 300) * 300 - 600
+            signature = '99:01:02:00'
+            with sqlite3.connect(db) as conn:
+                conn.execute('CREATE TABLE batches (node, collected, body)')
+                self.add_complete_current_coverage(conn, now, (target,))
+                for day in range(1, 8):
+                    self.add_profile_window(conn, 'home', target - day * 86400, signature, 0)
+                self.add_profile_window(conn, 'home', target, signature, 10)
+            result = packet_ranges.discover_candidates(db, 'home', now)
+            selected = [item for item in result['candidates'] if item['signature'] == signature]
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(selected[0]['candidate_kind'], 'new_signature')
+            self.assertNotIn('episode_bucket_count', selected[0])
+
+    def test_conflicting_duplicate_current_profile_invalidates_only_its_bucket(self):
+        with tempfile.TemporaryDirectory() as name:
+            db = Path(name) / 'data.sqlite'
+            now = 8 * 86400 + 12 * 3600
+            target = int(now // 300) * 300 - 600
+            with sqlite3.connect(db) as conn:
+                conn.execute('CREATE TABLE batches (node, collected, body)')
+                self.add_complete_current_coverage(conn, now, (target - 300, target, target + 300))
+                for day in range(1, 8):
+                    self.add_profile_window(conn, 'home', target - day * 86400, '99:01:02:00', 5)
+                for bucket, count in ((target - 300, 5), (target, 100), (target + 300, 5)):
+                    self.add_profile_window(conn, 'home', bucket, '99:01:02:00', count)
+                self.add_conflicting_duplicate_profile(conn, target, '99:01:02:00', 1)
+            result = packet_ranges.discover_candidates(db, 'home', now)
+            self.assertEqual(result['malformed_records'], 1)
+            self.assertFalse(any(item['bucket_start'] == target for item in result['candidates']))
+            self.assertGreaterEqual(result['current_incomplete_profile_windows'], 1)
+
+    def test_conflicting_duplicate_adjacent_profile_blocks_candidate_using_it_as_control(self):
+        with tempfile.TemporaryDirectory() as name:
+            db = Path(name) / 'data.sqlite'
+            now = 8 * 86400 + 12 * 3600
+            target = int(now // 300) * 300 - 600
+            with sqlite3.connect(db) as conn:
+                conn.execute('CREATE TABLE batches (node, collected, body)')
+                self.add_complete_current_coverage(conn, now, (target - 300, target, target + 300))
+                for day in range(1, 8):
+                    self.add_profile_window(conn, 'home', target - day * 86400, '99:01:02:00', 5)
+                for bucket, count in ((target - 300, 5), (target, 100), (target + 300, 5)):
+                    self.add_profile_window(conn, 'home', bucket, '99:01:02:00', count)
+                self.add_conflicting_duplicate_profile(conn, target - 300, '99:01:02:00', 4)
+            result = packet_ranges.discover_candidates(db, 'home', now)
+            self.assertFalse(any(item['bucket_start'] == target for item in result['candidates']))
+            self.assertGreater(result['candidate_suppressed_counts']['incomplete_neighbor_windows'], 0)
+
+    def test_conflicting_duplicate_historical_profile_is_excluded_from_baseline(self):
+        with tempfile.TemporaryDirectory() as name:
+            db = Path(name) / 'data.sqlite'
+            now = 8 * 86400 + 12 * 3600
+            target = int(now // 300) * 300 - 600
+            with sqlite3.connect(db) as conn:
+                conn.execute('CREATE TABLE batches (node, collected, body)')
+                self.add_complete_current_coverage(conn, now, (target - 300, target, target + 300))
+                for day in range(1, 8):
+                    self.add_profile_window(conn, 'home', target - day * 86400, '99:01:02:00', 5)
+                for bucket, count in ((target - 300, 5), (target, 100), (target + 300, 5)):
+                    self.add_profile_window(conn, 'home', bucket, '99:01:02:00', count)
+                self.add_conflicting_duplicate_profile(conn, target - 7 * 86400, '99:01:02:00', 4)
+            result = packet_ranges.discover_candidates(db, 'home', now)
+            candidate = next(item for item in result['candidates'] if item['bucket_start'] == target)
+            self.assertEqual(result['malformed_records'], 1)
+            self.assertEqual(candidate['same_slot_baseline_buckets'], 6)
+            self.assertTrue(candidate['candidate_evidence_complete'])
 
     def test_zero_profiles_and_packet_overflow_make_reported_window_incomplete(self):
         with tempfile.TemporaryDirectory() as name:
