@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.request
 import uuid
@@ -20,7 +21,7 @@ def connect(path):
     return db
 
 
-def collect(db, log_path, node, now, max_batches=1000, status=None):
+def collect(db, log_path, node, now, max_batches=1000, status=None, operations=None):
     # Backpressure: never silently discard unacknowledged telemetry.
     if db.execute('SELECT count(*) FROM outbox').fetchone()[0] >= max_batches:
         raise RuntimeError('outbox full: collection paused; source retention now limits recovery')
@@ -52,7 +53,8 @@ def collect(db, log_path, node, now, max_batches=1000, status=None):
             if len(events) >= 32:
                 break
         batch = {'schema': 1, 'id': str(uuid.uuid4()), 'node': node,
-                 'collected_at': now, 'events': events}
+                 'collected_at': now, 'events': events, 'operations': operations,
+                 'operations_collected_at': (operations or {}).get('last_success_at')}
         # Heartbeat denotes collector health only, never successful device operation.
         batch['events'].append({'kind': 'collector_heartbeat', 'at': now,
                                 'source_exists': Path(log_path).is_file(),
@@ -107,13 +109,20 @@ def main():
     stop = threading.Event()
     from maintenance import worker
     threading.Thread(target=worker, args=(database, options, stop), daemon=True).start()
+    from ha_operations import poll_operations, restore_cache
+    restore_cache(db, options['node_id'])
+    operations_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ha-operations')
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     while not stop.is_set():
         full = False
         try:
             status = supervisor_status(options['target_slug'], os.environ['SUPERVISOR_TOKEN'])
-            batch = collect(db, options['log_path'], options['node_id'], time.time(), status=status)
+            # HA operations runs separately with a bounded wait, so its API delays
+            # cannot block packet log cursor advancement.
+            operations = poll_operations(os.environ['SUPERVISOR_TOKEN'], executor=operations_executor)
+            batch = collect(db, options['log_path'], options['node_id'], time.time(), status=status,
+                            operations=operations)
             persist(db, options['retention_days'], options['max_storage_mb'])
             full = len(batch['events']) >= 33
         except Exception as error:
@@ -124,6 +133,7 @@ def main():
         remote_server.server_close()
     server.shutdown()
     server.server_close()
+    operations_executor.shutdown(wait=False, cancel_futures=True)
     db.close()
 
 
