@@ -110,9 +110,9 @@ def request(base, path, token, payload=None, timeout=5):
 
 def observe(base, path, token, payload=None):
     try:
-        return {'observation': 'available', 'data': request(base, path, token, payload)}
+        return {'observation': 'available', 'attempted': True, 'data': request(base, path, token, payload)}
     except APIError as exc:
-        return {'observation': exc.observation}
+        return {'observation': exc.observation, 'attempted': True}
 
 
 def _ws_send(sock, value):
@@ -215,9 +215,9 @@ def websocket_read(token, command, timeout=5, socket_factory=socket.create_conne
 
 def observe_ws(token, command, timeout=5):
     try:
-        return {'observation': 'available', 'data': websocket_read(token, command, timeout=timeout)}
+        return {'observation': 'available', 'attempted': True, 'data': websocket_read(token, command, timeout=timeout)}
     except APIError as exc:
-        return {'observation': exc.observation}
+        return {'observation': exc.observation, 'attempted': True}
 
 
 def compact_logs(result):
@@ -229,7 +229,7 @@ def compact_logs(result):
     if isinstance(entries, dict):
         entries = list(entries.values())
     if not isinstance(entries, list):
-        return {'observation': 'unsupported'}
+        return {'observation': 'unsupported', 'attempted': result.get('attempted', True)}
     entries = entries[-LOG_LIMIT:]
     counts = {'error': 0, 'warning': 0, 'other': 0}
     codes = set()
@@ -240,7 +240,8 @@ def compact_logs(result):
         counts[level] += 1
         # Never derive outbound identifiers from arbitrary log text. Severity
         # counts are the only exported log content until a fixed code registry exists.
-    return {'observation': 'available', 'sampled_entries': len(entries), 'buffer_limit': LOG_LIMIT,
+    return {'observation': 'available', 'attempted': result.get('attempted', True),
+            'sampled_entries': len(entries), 'buffer_limit': LOG_LIMIT,
             'counts': counts, 'error_codes': sorted(codes)[:30], 'truncated': len(entries) == LOG_LIMIT}
 
 
@@ -252,29 +253,33 @@ def compact_addons(addons, token, slugs=(), deadline=None, request_fn=None):
     permitted = set(ADDON_SLUGS) | {MONITOR_ADDON_SLUG} | {
         slug for slug in slugs if isinstance(slug, str) and re.fullmatch(r'[a-z0-9_]{1,64}', slug)}
     result = []
+    attempted_count = 0
     for item in items:
-        if deadline is not None and time.monotonic() >= deadline:
-            break
         slug = item.get('slug')
         if slug not in permitted:
             continue
         def probe(path):
             if deadline is not None and time.monotonic() >= deadline:
-                return {'observation': 'timeout'}
+                return {'observation': 'timeout', 'attempted': False}
             try:
                 left = 1 if deadline is None else max(.05, min(1, deadline - time.monotonic()))
-                return {'observation': 'available', 'data': request_fn(SUPERVISOR_BASE, path, token, timeout=left)}
+                return {'observation': 'available', 'attempted': True,
+                        'data': request_fn(SUPERVISOR_BASE, path, token, timeout=left)}
             except APIError as exc:
-                return {'observation': exc.observation}
+                return {'observation': exc.observation, 'attempted': True}
         info = probe('/addons/' + slug + '/info')
+        attempted_count += int(info.get('attempted', False))
         i = info.get('data', {})
-        result.append({'slug': slug, 'info': ({'observation': 'available'} | {k: i[k] for k in ('state', 'version', 'version_latest', 'update_available') if k in i})
-                       if info['observation'] == 'available' and isinstance(i, dict) else {'observation': info['observation']},
-                       'logs': {'observation': 'permission_denied'},
-                       'stats': {'observation': 'permission_denied'}})
-    available = any(item.get('info', {}).get('observation') == 'available' for item in result)
-    return {'observation': 'available' if available else 'unavailable', 'addons': result,
-            'allowlisted_count': len(slugs)}
+        result.append({'slug': slug, 'info': ({'observation': 'available', 'attempted': True} | {k: i[k] for k in ('state', 'version', 'version_latest', 'update_available') if k in i})
+                       if info['observation'] == 'available' and isinstance(i, dict) else {'observation': info['observation'], 'attempted': info.get('attempted', False)},
+                       'logs': {'observation': 'permission_denied', 'attempted': False},
+                       'stats': {'observation': 'permission_denied', 'attempted': False}})
+    available = sum(item.get('info', {}).get('observation') == 'available' for item in result)
+    missing = max(0, len(items) - len(result)) + sum(
+        not item.get('info', {}).get('attempted', True) for item in result)
+    return {'observation': 'available' if available == len(items) and not missing else 'partial' if available else 'unavailable',
+            'attempted': attempted_count > 0, 'attempted_count': attempted_count,
+            'allowlisted_count': len(items), 'unattempted_count': missing, 'addons': result}
 
 
 def compact_updates(result):
@@ -283,7 +288,7 @@ def compact_updates(result):
     data = result['data']
     items = data if isinstance(data, list) else data.get('updates', data.get('available_updates', [])) if isinstance(data, dict) else []
     if not isinstance(items, list):
-        return {'observation': 'unsupported'}
+        return {'observation': 'unsupported', 'attempted': result.get('attempted', True)}
     safe_items = []
     for item in items[:50]:
         if not isinstance(item, dict):
@@ -308,19 +313,20 @@ def compact_repairs(result):
     data = result['data']
     values = data.get('issues', []) if isinstance(data, dict) else data
     if not isinstance(values, list):
-        return {'observation': 'unsupported'}
+        return {'observation': 'unsupported', 'attempted': result.get('attempted', True)}
     severities = {'critical': 0, 'error': 0, 'warning': 0, 'other': 0}
     for issue in values:
         level = str(issue.get('severity', '')).lower() if isinstance(issue, dict) else ''
         severities[level if level in severities and level != 'other' else 'other'] += 1
-    return {'observation': 'available', 'open_count': len(values), 'severity_counts': severities}
+    return {'observation': 'available', 'attempted': result.get('attempted', True),
+            'open_count': len(values), 'severity_counts': severities}
 
 
 def compact_notifications(result):
     if result['observation'] != 'available':
         return result
     values = result['data']
-    return {'observation': 'available', 'count': len(values)} if isinstance(values, list) else {'observation': 'unsupported'}
+    return {'observation': 'available', 'attempted': result.get('attempted', True), 'count': len(values)} if isinstance(values, list) else {'observation': 'unsupported', 'attempted': result.get('attempted', True)}
 
 
 def compact_backup(result):
@@ -328,10 +334,10 @@ def compact_backup(result):
         return result
     data = result['data']
     if not isinstance(data, dict):
-        return {'observation': 'unsupported'}
+        return {'observation': 'unsupported', 'attempted': result.get('attempted', True)}
     backups = data.get('backups', [])
     if not isinstance(backups, list):
-        return {'observation': 'unsupported'}
+        return {'observation': 'unsupported', 'attempted': result.get('attempted', True)}
     partial_failures = 0
     for item in backups:
         if not isinstance(item, dict):
@@ -342,7 +348,7 @@ def compact_backup(result):
     manager_state = data.get('state')
     if manager_state not in {'idle', 'create_backup', 'blocked', 'receive_backup', 'restore_backup'}:
         manager_state = 'unknown'
-    return {'observation': 'available', 'backup_count': len(backups),
+    return {'observation': 'available', 'attempted': result.get('attempted', True), 'backup_count': len(backups),
             'last_attempted_at': data.get('last_attempted_automatic_backup'),
             'last_successful_at': data.get('last_completed_automatic_backup'),
             'next_scheduled_at': data.get('next_automatic_backup'),
@@ -355,10 +361,10 @@ def compact_backup(result):
 
 def summarize_states(result):
     if result['observation'] != 'available':
-        return {'observation': result['observation']}
+        return {'observation': result['observation'], 'attempted': result.get('attempted', False)}
     entities = result['data']
     if not isinstance(entities, list):
-        return {'observation': 'unsupported'}
+        return {'observation': 'unsupported', 'attempted': result.get('attempted', True)}
     selected = {}
     for item in entities:
         if not isinstance(item, dict):
@@ -390,7 +396,7 @@ def summarize_states(result):
     backup['last_attempt_outcome'] = {'observation': 'unsupported', 'reason': 'outcome_requires_admin_backup_info'}
     backup['fields_observed'] = sorted(key for key in backup if isinstance(backup.get(key), dict)
                                        and backup[key].get('observation') == 'available')
-    return {'observation': 'available', 'backup': backup,
+    return {'observation': 'available', 'attempted': result.get('attempted', True), 'backup': backup,
             'storage': {key: ({'observation': 'unavailable'} if selected.get(key, '').lower() in ('unknown','unavailable','none','')
                               else {'observation': 'available', 'value': selected[key]})
                         if key in selected else {'observation': 'unsupported'}
@@ -405,15 +411,16 @@ def collect(token, previous=None, deadline=None, request_fn=None, target_slug=''
     # Patchable reader keeps version/API fixtures testable while preserving the fixed target list.
     def read(base, path, payload=None):
         if deadline is not None and time.monotonic() >= deadline:
-            return {'observation': 'timeout'}
+            return {'observation': 'timeout', 'attempted': False}
         try:
             left = 1 if deadline is None else max(.05, min(1, deadline - time.monotonic()))
-            return {'observation': 'available', 'data': request_fn(base, path, token, payload, timeout=left)}
+            return {'observation': 'available', 'attempted': True,
+                    'data': request_fn(base, path, token, payload, timeout=left)}
         except APIError as exc:
-            return {'observation': exc.observation}
+            return {'observation': exc.observation, 'attempted': True}
     def read_ws(command):
         if deadline is not None and time.monotonic() >= deadline:
-            return {'observation': 'timeout'}
+            return {'observation': 'timeout', 'attempted': False}
         return observe_ws(token, command, timeout=1 if deadline is None else max(.05, min(1, deadline-time.monotonic())))
     core_log = compact_logs(read_ws('system_log/list'))
     repairs = compact_repairs(read_ws('repairs/list_issues'))
@@ -435,8 +442,8 @@ def collect(token, previous=None, deadline=None, request_fn=None, target_slug=''
         data = result['data']
         values = data.get(key, []) if isinstance(data, dict) else data
         if not isinstance(values, list):
-            return {'observation': 'unsupported'}
-        return {'observation': 'available', count_key: len(values)}
+            return {'observation': 'unsupported', 'attempted': result.get('attempted', True)}
+        return {'observation': 'available', 'attempted': result.get('attempted', True), count_key: len(values)}
     addons = compact_addons({'observation': 'available'}, token, addon_slugs, deadline, request_fn)
     updates = []
     for slug, result in [('homeassistant', core_info), ('supervisor', supervisor_info), ('os', os_info)]:
@@ -458,15 +465,18 @@ def collect(token, previous=None, deadline=None, request_fn=None, target_slug=''
         'updates': {'observation': ('available' if all(r.get('observation') == 'available' for r in (core_info, supervisor_info, os_info))
                                     else 'partial' if any(r.get('observation') == 'available' for r in (core_info, supervisor_info, os_info))
                                     else 'unavailable'),
+                    'attempted': any(r.get('attempted', False) for r in (core_info, supervisor_info, os_info)),
                     'items': updates, 'count': len(updates)},
         'storage': {'observation': ('available' if any(value.get('observation') == 'available'
                                                        for value in state_summary.get('storage', {}).values()) else
                                     state_summary['observation'] if state_summary['observation'] != 'available' else 'unsupported'),
+                    'attempted': state_summary.get('attempted', False),
                     'disk_sensors': state_summary.get('storage', {}),
                     'fields_observed': state_summary.get('storage_fields_observed', [])},
-        'host': {k: host['data'][k] for k in ('disk_total', 'disk_free')
-                 if isinstance(host.get('data', {}).get(k), (int, float)) and host['data'][k] >= 0}
-                if host['observation'] == 'available' else {'observation': host['observation']},
+        'host': ({'observation': 'available', 'attempted': host.get('attempted', True)} |
+                 {k: host['data'][k] for k in ('disk_total', 'disk_free')
+                  if isinstance(host.get('data', {}).get(k), (int, float)) and host['data'][k] >= 0})
+                if host['observation'] == 'available' else {'observation': host['observation'], 'attempted': host.get('attempted', False)},
         'resolution': list_summary(resolution, 'unhealthy', 'unhealthy_count'),
         'limitations': ['Collected API state does not prove physical device operation or backup restorability.',
                         'Log data is a bounded latest-50 sample, not complete history.']}
@@ -474,13 +484,16 @@ def collect(token, previous=None, deadline=None, request_fn=None, target_slug=''
                     operations['backups'], operations['updates'], operations['storage'], operations['host'], operations['resolution']]
     observations.extend(addon.get('info', {}) for addon in addons.get('addons', []))
     good = sum(1 for item in observations if item.get('observation') == 'available' or item.get('state') is not None)
+    def section_status(value):
+        return {'attempted': bool(value.get('attempted', False)),
+                'observation': value.get('observation', 'unavailable')}
     operations['sections'] = {
-        'core_logs': core_log['observation'], 'repairs': repairs['observation'],
-        'persistent_notifications': notifications['observation'], 'backups': backup['observation'],
-        'core_info': core_info['observation'], 'supervisor_info': supervisor_info['observation'],
-        'os_info': os_info['observation'], 'core_states': states['observation'],
-        'host_info': host['observation'], 'resolution': operations['resolution']['observation'],
-        'addons': addons['observation'], 'storage': operations['storage']['observation'],
+        'core_logs': section_status(core_log), 'repairs': section_status(repairs),
+        'persistent_notifications': section_status(notifications), 'backups': section_status(backup),
+        'core_info': section_status(core_info), 'supervisor_info': section_status(supervisor_info),
+        'os_info': section_status(os_info), 'core_states': section_status(states),
+        'host_info': section_status(host), 'resolution': section_status(operations['resolution']),
+        'addons': section_status(addons), 'storage': section_status(operations['storage']),
     }
     operations['observation'] = 'available' if good == len(observations) else 'partial' if good else 'unavailable'
     return operations
