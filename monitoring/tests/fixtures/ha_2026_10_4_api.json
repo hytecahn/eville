@@ -1,0 +1,33 @@
+{
+  "home_assistant_core": "2026.10.4",
+  "source_refs": {
+    "backup_websocket": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/backup/websocket.py",
+    "backup_sensor": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/backup/sensor.py",
+    "persistent_notification": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/persistent_notification/__init__.py"
+  },
+  "websocket_admin_or_auth_required": [
+    "persistent_notification/get",
+    "persistent_notification/subscribe",
+    "backup/info",
+    "system_log/list",
+    "repairs/list_issues"
+  ],
+  "websocket_auth": {
+    "system_log/list": {"admin_required": true},
+    "repairs/list_issues": {"admin_required": false}
+  },
+  "backup/info": {
+    "admin_required": true,
+    "fields": ["backups", "last_attempted_automatic_backup", "last_completed_automatic_backup", "next_automatic_backup", "state"]
+  },
+  "backup_sensors": [
+    "sensor.backup_backup_manager_state",
+    "sensor.backup_next_scheduled_automatic_backup",
+    "sensor.backup_last_successful_automatic_backup",
+    "sensor.backup_last_attempted_automatic_backup"
+  ],
+  "persistent_notification/get": {
+    "message_contents_returned_by_protocol": true,
+    "implementation_exports": "count_only"
+  }
+}
