@@ -15,7 +15,7 @@ from protocol import redact
 
 MAX_REQUEST = 1024
 MAX_RESPONSE = 262144
-PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily', '/v1/packets', '/v1/action-window', '/v1/candidates'}
+PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily', '/v1/packets', '/v1/action-window', '/v1/candidates', '/v1/operations'}
 ACTION_PATH = '/v1/daily/run'
 
 
@@ -120,6 +120,35 @@ def recent(database, node, limit=20):
                     if len(events) >= limit:
                         return events
     return events
+
+
+    return events
+
+
+def operations_snapshot(database, node):
+    """Return only the latest persisted HA operations summary, never source logs."""
+    with closing(sqlite3.connect('file:' + str(database) + '?mode=ro', uri=True)) as db:
+        row = db.execute('SELECT collected,body FROM batches WHERE node=? ORDER BY collected DESC LIMIT 1', (node,)).fetchone()
+    if row is None:
+        return {'observation': 'unavailable', 'reason': 'no_collection'}
+    batch = json.loads(row[1])
+    operations = batch.get('operations')
+    age = max(0, time.time() - row[0])
+    if operations is None:
+        return {'observation': 'unavailable', 'reason': 'collector_not_yet_updated', 'collected_at': row[0], 'collector_age_seconds': age}
+    batch = json.loads(row[1])
+    status = operations if isinstance(operations, dict) and 'summary' in operations else {
+        'summary': operations, 'last_success_at': batch.get('operations_collected_at'),
+        'last_attempt_at': batch.get('operations_collected_at'), 'last_error': None}
+    data_age = None if status.get('last_success_at') is None else max(0, time.time() - status['last_success_at'])
+    return {'observation': 'available' if age <= 180 and data_age is not None and data_age <= 1800 else 'stale',
+            'collected_at': row[0], 'collector_age_seconds': age,
+            'last_attempt_at': status.get('last_attempt_at'), 'last_success_at': status.get('last_success_at'),
+            'last_error': status.get('last_error'), 'data_age_seconds': data_age,
+            'summary': status.get('summary')}
+
+
+class LimitedServer(ThreadingHTTPServer):
 
 
 class LimitedServer(ThreadingHTTPServer):
@@ -231,6 +260,8 @@ def handler(database, node, secret, options=None):
                 elif self.path == '/v1/candidates':
                     from packet_ranges import discover_candidates
                     result = discover_candidates(database, node, now, payload.get('hours', 24))
+                elif self.path == '/v1/operations':
+                    result = operations_snapshot(database, node)
                 elif self.path == '/v1/daily':
                     result = daily_snapshot(database, node, options, now)
                 else:
