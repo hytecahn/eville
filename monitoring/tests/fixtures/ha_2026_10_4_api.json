@@ -23,7 +23,8 @@
   },
   "backup/info": {
     "admin_required": true,
-    "fields": ["backups", "last_attempted_automatic_backup", "last_completed_automatic_backup", "next_automatic_backup", "state"]
+    "fields": ["backups", "last_attempted_automatic_backup", "last_completed_automatic_backup", "next_automatic_backup", "state"],
+    "manager_states": ["idle", "create_backup", "blocked", "receive_backup", "restore_backup"]
   },
   "backup_sensors": [
     "sensor.backup_backup_manager_state",
