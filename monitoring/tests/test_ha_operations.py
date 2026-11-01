@@ -152,6 +152,10 @@ class OperationsTests(unittest.TestCase):
         self.assertIn('persistent_notification/get', fixture['websocket_admin_or_auth_required'])
         self.assertIn('backup/info', fixture['websocket_admin_or_auth_required'])
         self.assertTrue(fixture['backup/info']['admin_required'])
+        self.assertEqual(ha.compact_backup({'observation': 'available', 'data': {
+            'backups': [], 'state': 'create_backup'}})['manager_state'], 'create_backup')
+        self.assertEqual(ha.compact_backup({'observation': 'available', 'data': {
+            'backups': [], 'state': 'private raw text'}})['manager_state'], 'unknown')
         self.assertTrue(fixture['supervisor_role_default']['allows_addon_info_pattern'])
         self.assertFalse(fixture['supervisor_role_default']['allows_available_updates'])
         self.assertEqual(fixture['available_update_item_fields'], ['update_type', 'panel_path', 'version_latest'])
