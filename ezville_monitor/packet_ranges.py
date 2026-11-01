@@ -12,6 +12,81 @@ MIN_BASELINE_BUCKETS = 6
 MAX_SCAN_BATCHES = 30000
 
 
+def group_periodic_variant_candidates(candidates):
+    """Aggregate only repeated, regularly spaced fingerprint-only candidates.
+
+    The per-bucket evidence remains in the archive. Groups retain bounded time
+    examples and explicit totals so periodic traffic does not crowd rare or
+    localized candidates out of the primary list.
+    """
+    by_signature = {}
+    for item in candidates:
+        if item.get('candidate_signal') == 'variant_only':
+            by_signature.setdefault(item['signature'], []).append(item)
+
+    grouped_ids = set()
+    groups = []
+    for signature, items in by_signature.items():
+        items.sort(key=lambda item: item['bucket_start'])
+        if len(items) < 5:
+            continue
+        intervals = [items[index]['bucket_start'] - items[index - 1]['bucket_start']
+                     for index in range(1, len(items))]
+        cadence = None
+        regularity = 0
+        for period in range(1800, BUCKET_SECONDS - 1, -BUCKET_SECONDS):
+            multiples = [max(1, round(interval / period)) for interval in intervals]
+            aligned = [abs(interval - multiple * period) <= 120
+                       for interval, multiple in zip(intervals, multiples)]
+            current_cadence = sum(aligned) / len(aligned)
+            single_period = sum(ok and multiple == 1
+                                for ok, multiple in zip(aligned, multiples)) / len(aligned)
+            if current_cadence >= 0.8 and single_period >= 0.6:
+                cadence, regularity = period, current_cadence
+                break
+        if cadence is None:
+            continue
+
+        grouped_ids.update(id(item) for item in items)
+        # Keep a small, evenly spaced sample of the occurrence evidence. The
+        # source profile rows remain available in the local archive.
+        sample_count = min(8, len(items))
+        sample_indexes = sorted({round(i * (len(items) - 1) / max(1, sample_count - 1))
+                                 for i in range(sample_count)})
+        examples = [{key: item[key] for key in (
+            'bucket_start', 'bucket_end', 'count', 'control_before', 'control_after',
+            'same_slot_baseline_median', 'new_tracked_variants', 'variant_changes')}
+            for index, item in enumerate(items) if index in sample_indexes]
+        groups.append({
+            'group_id': '{}:{}:{}'.format(signature, cadence, int(items[0]['bucket_start'])),
+            'signature': signature,
+            'label': items[0]['label'],
+            'category': items[0]['category'],
+            'candidate_kind': 'periodic_variant_only',
+            'priority': 'low',
+            'grouping_reason': 'Fingerprint-only novelty recurs at a regular cadence; review as one pattern.',
+            'occurrence_count': len(items),
+            'first_bucket_start': items[0]['bucket_start'],
+            'last_bucket_end': items[-1]['bucket_end'],
+            'cadence_seconds': cadence,
+            'cadence_regularity': round(regularity, 3),
+            'count_min': min(item['count'] for item in items),
+            'count_max': max(item['count'] for item in items),
+            'count_median': sorted(item['count'] for item in items)[len(items) // 2],
+            'control_before_median': sorted(item['control_before'] for item in items)[len(items) // 2],
+            'control_after_median': sorted(item['control_after'] for item in items)[len(items) // 2],
+            'same_slot_baseline_median': sorted(item['same_slot_baseline_median'] for item in items)[len(items) // 2],
+            'new_variant_observations': sum(item['new_tracked_variants'] for item in items),
+            'variant_changes_total': sum(item['variant_changes'] for item in items),
+            'occurrence_examples': examples,
+            'occurrence_examples_truncated': len(examples) < len(items),
+            'limitation': 'Five-minute profile associations; no event time or packet meaning established.'})
+
+    groups.sort(key=lambda item: (-item['occurrence_count'], -item['last_bucket_end'], item['signature']))
+    primary = [item for item in candidates if id(item) not in grouped_ids]
+    return primary, groups
+
+
 def read(database, node, start, end, now):
     if (type(start) not in (int, float) or type(end) not in (int, float)
             or not math.isfinite(start) or not math.isfinite(end)
@@ -392,6 +467,9 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
                 'classification_basis': item.get('classification_basis', 'structural_profile_candidate'),
                 'candidate_kind': ('sustained_new_signature_episode' if sustained_new else
                                    'new_signature' if is_new else 'local_rate_or_variant_change'),
+                'candidate_signal': ('variant_only' if not is_new and not spike and novel_variants > 0 and not changed
+                                     else 'count_or_local_change' if spike or changed
+                                     else 'new_signature'),
                 'count': current_count, 'control_before': prev['count'] if prev else 0,
                 'control_after': nxt['count'] if nxt else 0,
                 'same_slot_baseline_buckets': historical_presence,
@@ -429,6 +507,8 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
             if include_samples:
                 candidate['raw_samples'] = list(cur['samples']) if cur else []
             candidates.append(candidate)
+    candidate_occurrences_total = len(candidates)
+    candidates, periodic_variant_groups = group_periodic_variant_candidates(candidates)
     candidates.sort(key=lambda item: (-item['score'], -item['bucket_start'], -item['count'], item['signature']))
     return {'node': node, 'window_start': start, 'window_end': end,
             'bucket_seconds': BUCKET_SECONDS, 'complete_profile_buckets': len(complete_buckets),
@@ -436,7 +516,12 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
             'matching_rows_detected_at_least': MAX_SCAN_BATCHES + 1 if truncated else matching_rows_seen,
             'older_rows_omitted_at_least': 1 if truncated else 0,
             'candidate_total': len(candidates), 'candidates': candidates[:50],
+            'candidate_occurrences_total': candidate_occurrences_total,
             'candidate_list_truncated': len(candidates) > 50,
+            'periodic_variant_group_total': len(periodic_variant_groups),
+            'periodic_variant_groups': periodic_variant_groups[:20],
+            'periodic_variant_groups_truncated': len(periodic_variant_groups) > 20,
+            'periodic_variant_occurrences_grouped': sum(item['occurrence_count'] for item in periodic_variant_groups),
             'candidate_suppressed_counts': filtered,
             'missing_profile_buckets': len(missing), 'source_missing_or_gaps': gaps,
             'collector_max_gap_seconds': round(heartbeat_gap),

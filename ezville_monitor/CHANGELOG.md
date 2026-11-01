@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.3
+
+- Aggregate regularly recurring fingerprint-only candidate windows into bounded, low-priority groups.
+- Preserve localized/count-change and rare variant candidates in the primary list; report grouped occurrence totals and examples.
+- Preserve passive collection and existing database format; issue no HA or device commands.
+
 ## 0.7.2
 
 - Evaluate candidates using complete local windows and observed same-time baselines instead of unrelated historical gaps.
