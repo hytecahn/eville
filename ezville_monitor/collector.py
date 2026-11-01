@@ -83,6 +83,23 @@ def supervisor_status(slug, token):
     return result
 
 
+def operations_packet_status(operations, slug):
+    """Adapt the worker cache to the legacy packet report version fields."""
+    summary = operations.get('summary') if isinstance(operations, dict) else None
+    sections = summary.get('sections', {}) if isinstance(summary, dict) else {}
+    core = summary.get('core', {}) if isinstance(summary, dict) else {}
+    addon = next((item for item in summary.get('addons', {}).get('addons', [])
+                  if item.get('slug') == slug), None) if isinstance(summary, dict) else None
+    addon_info = addon.get('info', {}) if isinstance(addon, dict) else {'observation': 'unsupported'}
+    return {
+        'core': {'observation': sections.get('core_info', 'unavailable'),
+                 **({'version': core['version']} if core.get('version') is not None else {})},
+        'addon': {'observation': addon_info.get('observation', 'unavailable'),
+                  **{key: addon_info[key] for key in ('state', 'version') if key in addon_info}},
+    }
+
+
+
 def main():
     from archive import initialize, persist, serve
     options = json.loads(Path('/data/options.json').read_text())
@@ -118,11 +135,11 @@ def main():
     while not stop.is_set():
         full = False
         try:
-            status = supervisor_status(options['target_slug'], os.environ['SUPERVISOR_TOKEN'])
             # HA operations calls run in a separate worker/cache; packet cursor advancement
             # submits work and never waits for the HA request to finish.
             operations = poll_operations(os.environ['SUPERVISOR_TOKEN'], executor=operations_executor,
                                          target_slug=options.get('target_slug', ''))
+            status = operations_packet_status(operations, options.get('target_slug', ''))
             operations_to_persist = operations if operations.get('revision', 0) > last_operations_persisted_revision else None
             batch = collect(db, options['log_path'], options['node_id'], time.time(), status=status,
                             operations=operations_to_persist)
