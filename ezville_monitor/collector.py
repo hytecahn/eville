@@ -109,8 +109,9 @@ def main():
     stop = threading.Event()
     from maintenance import worker
     threading.Thread(target=worker, args=(database, options, stop), daemon=True).start()
-    from ha_operations import poll_operations, restore_cache
+    from ha_operations import cached_status, poll_operations, restore_cache
     restore_cache(db, options['node_id'])
+    last_operations_persisted_at = cached_status().get('last_attempt_at')
     operations_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ha-operations')
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -121,8 +122,11 @@ def main():
             # HA operations runs separately with a bounded wait, so its API delays
             # cannot block packet log cursor advancement.
             operations = poll_operations(os.environ['SUPERVISOR_TOKEN'], executor=operations_executor)
+            operations_to_persist = operations if operations.get('last_attempt_at') != last_operations_persisted_at else None
+            if operations_to_persist is not None:
+                last_operations_persisted_at = operations.get('last_attempt_at')
             batch = collect(db, options['log_path'], options['node_id'], time.time(), status=status,
-                            operations=operations)
+                            operations=operations_to_persist)
             persist(db, options['retention_days'], options['max_storage_mb'])
             full = len(batch['events']) >= 33
         except Exception as error:
