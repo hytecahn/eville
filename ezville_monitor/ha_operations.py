@@ -340,7 +340,7 @@ def compact_backup(result):
                                 if isinstance(item.get(key, []), list))
     errors = data.get('agent_errors', {})
     manager_state = data.get('state')
-    if manager_state not in {'idle', 'creating', 'uploading', 'failed', 'unknown'}:
+    if manager_state not in {'idle', 'create_backup', 'blocked', 'receive_backup', 'restore_backup'}:
         manager_state = 'unknown'
     return {'observation': 'available', 'backup_count': len(backups),
             'last_attempted_at': data.get('last_attempted_automatic_backup'),
