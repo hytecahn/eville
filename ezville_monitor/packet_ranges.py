@@ -247,6 +247,7 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
                         if existing is not None:
                             if existing['record_identity'] != record_identity:
                                 malformed += 1
+                                bad_buckets.add(bucket)
                             continue
                         bucket_profiles[signature] = {
                             'count': count, 'changes': changes, 'variants': set(variants),
@@ -267,6 +268,26 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
         if (bucket not in bad_buckets and overflow_counts.get(bucket, 0) == 0
                 and len(profiles) == meta['signatures'] and actual_total == meta['total']):
             complete_windows.add(bucket)
+    # Build contiguous positive-count signature episodes once. The candidate
+    # loop visits every bucket/signature pair; walking each episode in both
+    # directions there makes steady traffic quadratic in the scan horizon.
+    episode_ranges = {}
+    for bucket in sorted(complete_windows):
+        for sig, profile in by_bucket.get(bucket, {}).items():
+            if profile['count'] <= 0:
+                continue
+            prior = by_bucket.get(bucket - BUCKET_SECONDS, {}).get(sig)
+            if bucket - BUCKET_SECONDS in complete_windows and prior and prior['count'] > 0:
+                continue
+            run_end = bucket + BUCKET_SECONDS
+            while run_end in complete_windows:
+                following_profile = by_bucket.get(run_end, {}).get(sig)
+                if not following_profile or following_profile['count'] <= 0:
+                    break
+                run_end += BUCKET_SECONDS
+            run = (bucket, run_end, (run_end - bucket) // BUCKET_SECONDS)
+            for member in range(bucket, run_end, BUCKET_SECONDS):
+                episode_ranges[(sig, member)] = run
     incomplete_profile_windows = len(observed_window_buckets - complete_windows)
     complete_buckets = sorted(bucket for bucket in complete_windows if start <= bucket < end)
     missing = []
@@ -338,24 +359,13 @@ def discover_candidates(database, node, now, hours=24, include_samples=False):
             if historical_presence < MIN_BASELINE_BUCKETS or truncated:
                 filtered['insufficient_same_slot_baseline'] += 1
                 continue
-            never_seen_at_same_time = cur is not None and not any(historical_counts)
-            def present(bucket_value):
-                profile = by_bucket.get(bucket_value, {}).get(sig)
-                return profile is not None and profile['count'] > 0
-            # Treat adjacent buckets with a newly seen signature as one sustained
-            # episode, not a fresh action candidate every five minutes.
-            run_start = bucket
-            while (run_start - BUCKET_SECONDS in complete_windows
-                   and present(run_start - BUCKET_SECONDS)):
-                run_start -= BUCKET_SECONDS
-            run_end = bucket + BUCKET_SECONDS
-            while run_end in complete_windows and present(run_end):
-                run_end += BUCKET_SECONDS
-            run_buckets = (run_end - run_start) // BUCKET_SECONDS if never_seen_at_same_time else 0
-            if never_seen_at_same_time and run_buckets > 1 and bucket != run_start:
+            never_seen_at_same_time = cur is not None and cur['count'] > 0 and not any(historical_counts)
+            episode = episode_ranges.get((sig, bucket)) if never_seen_at_same_time else None
+            run_start, run_end, run_buckets = episode if episode else (bucket, bucket + BUCKET_SECONDS, 0)
+            if never_seen_at_same_time and episode and bucket != run_start:
                 filtered['sustained_episode_duplicate'] += 1
                 continue
-            is_new = never_seen_at_same_time
+            is_new = never_seen_at_same_time and episode is not None
             spike_floor = max(4, local_control * 4, median_count * 4, median_count + 3)
             spike = current_count >= spike_floor and current_count > local_control and current_count > median_count
             adjacent_variants = (prev['variants'] if prev else set()) | (nxt['variants'] if nxt else set())
