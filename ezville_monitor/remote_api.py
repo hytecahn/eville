@@ -52,7 +52,7 @@ def daily_snapshot(database, node, options, now):
             candidate.pop('sample', None)
     for call in summary['calls']:
         call.pop('request_id', None)
-    return {'node': node, 'monitor_version': '0.7.2', 'window_day': day,
+    return {'node': node, 'monitor_version': '0.7.3', 'window_day': day,
             'daily_enabled': bool(options.get('daily_enabled')) if options is not None else None,
             'mobile_notification_configured': bool(options.get('daily_notify_service')) if options is not None else None,
             'enabled_since': state.get('enabled_since'),

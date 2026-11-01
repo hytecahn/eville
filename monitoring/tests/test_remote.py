@@ -16,6 +16,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ezville_monitor'))
 import archive
 import collector
 import remote_api
+import packet_ranges
 import daily
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import read_remote
@@ -121,6 +122,14 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(result['candidate_total'], 0)
         self.assertEqual(result['bucket_seconds'], 300)
         self.assertEqual(self.db.execute('SELECT count(*) FROM batches').fetchone()[0], 1)
+        grouped = dict(result, candidate_occurrences_total=5, periodic_variant_group_total=1,
+                       periodic_variant_occurrences_grouped=5,
+                       periodic_variant_groups=[{'signature': '40:01:07:A5', 'occurrence_count': 5,
+                                                'occurrence_examples_truncated': True}])
+        with patch.object(packet_ranges, 'discover_candidates', return_value=grouped):
+            grouped_result = self.read('/v1/candidates', {'hours': 12})
+        self.assertEqual(grouped_result['periodic_variant_groups'][0]['signature'], '40:01:07:A5')
+        self.assertNotIn('raw_samples', grouped_result['periodic_variant_groups'][0])
         for payload in ({'hours': 5}, {'hours': 25}, {'hours': 12, 'sql': 'DELETE'}):
             request, _ = self.request('/v1/candidates', payload)
             self.assertEqual(self.status(request), 400)
@@ -365,6 +374,45 @@ class RemoteTests(unittest.TestCase):
                     self.assertIn('다시 생성', response.read().decode())
                 run.assert_called_once()
                 self.assertTrue(run.call_args.kwargs['force'])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_ha_ingress_shows_periodic_variant_groups_separately(self):
+        group = {'signature': '40:01:07:A5', 'occurrence_count': 5,
+                 'first_bucket_start': 100, 'last_bucket_end': 2800,
+                 'cadence_seconds': 600, 'count_median': 2,
+                 'control_before_median': 1, 'control_after_median': 1,
+                 'same_slot_baseline_median': 2, 'variant_changes_total': 0,
+                 'occurrence_examples': [{'bucket_start': 100}, {'bucket_start': 2200}]}
+        candidate_report = {
+            'observation_complete': True, 'complete_profile_buckets': 288,
+            'current_incomplete_profile_windows': 0, 'historical_incomplete_profile_windows': 0,
+            'overflowed_profile_windows': 0, 'missing_profile_buckets': 0,
+            'collector_max_gap_seconds': 60, 'truncated': False,
+            'batches_scanned': 10, 'batch_scan_limit': 30000,
+            'matching_rows_detected_at_least': 10, 'older_rows_omitted_at_least': 0,
+            'baseline_days_configured': 7, 'minimum_baseline_days_required': 6,
+            'candidate_total': 0, 'periodic_variant_group_total': 1,
+            'periodic_variant_occurrences_grouped': 5, 'candidate_occurrences_total': 5,
+            'candidate_suppressed_counts': {}, 'candidate_list_truncated': False,
+            'candidates': [], 'periodic_variant_groups': [group],
+            'periodic_variant_groups_truncated': False}
+        handler = archive.handler(self.database, 'home', None)
+        handler.allowed = lambda self: True
+        server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.object(packet_ranges, 'discover_candidates', return_value=candidate_report):
+                with urllib.request.urlopen('http://127.0.0.1:%s/' % server.server_port) as response:
+                    page = response.read().decode()
+            self.assertIn('주기 variant-only 그룹 1개 / 발생 구간 5개', page)
+            self.assertIn('낮은 우선순위', page)
+            self.assertIn('40:01:07:A5', page)
+            self.assertIn('variant_changes 합계 0', page)
+            self.assertIn('발생마다 행동 확인 질문을 반복하지 않습니다.', page)
         finally:
             server.shutdown()
             server.server_close()

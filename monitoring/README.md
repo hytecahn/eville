@@ -107,99 +107,6 @@ interrupted `running` reports need manual inspection to avoid duplicate phone pu
 
 ## Weekly job
 
-## HA operations snapshot (opt-in remote read endpoint)
-
-The Monitor process can collect a privacy-minimized Home Assistant operations
-snapshot into the existing persistent SQLite archive. A separate worker samples
-up to 50 Core log entries every 15 minutes and stores only severity counts;
-arbitrary log text is never turned into outbound error codes. It also stores
-repair and persistent-notification counts, status/version/update metadata for
-the Monitor and the controller slug from the existing `target_slug` option,
-Core backup metadata or explicitly observed backup sensors, and storage/host/
-resolution observations. It does not call Supervisor add-on logs or stats.
-Supervisor `/host/info` reports total/free space in GiB; the summary converts those
-two validated values to bytes before exposing `disk_total_bytes` and
-`disk_free_bytes`.
-Unsupported endpoints, permission failures and timeouts remain explicit and are
-never reported as healthy. The single worker submits asynchronously with a
-bounded per-request budget; packet log cursor advancement never waits for it.
-The remote view includes last attempt/success/error and data age; a stopped
-collector is identified by stale heartbeat. Packet discovery remains separately
-collected.
-
-The worker uses per-operation socket and body-read deadlines, but a thread blocked
-inside platform DNS resolution cannot be forcibly cancelled by Python. If it
-exceeds its watchdog, the cache reports `worker_stuck` and does not start an
-unbounded queue of replacements; a process restart is needed to clear that
-blocked-worker state. This is a limit of the runtime, not a guarantee of a hard
-end-to-end deadline. WebSocket control ping/pong and fragmented text messages
-are handled within the same bounded message size. Log/repair/notification
-summaries are counts only: an item may be replaced while the count remains the
-same, so these summaries cannot promise per-item change detection.
-
-Collection and external summary publication are separate, default-off opt-ins:
-`operations_enabled` starts local reads; `operations_remote_enabled` permits the
-signed `/v1/operations` response and additionally requires existing
-`remote_enabled: true`. Only literal boolean `true` enables either setting.
-Missing settings in an existing 0.7.1 options file and malformed values keep
-both off. Disabling export suppresses old cached and persisted snapshots too.
-
-An additive `operations_snapshots` SQLite table stores one indexed latest record
-per node, independent of batch backlog and batch retention. Existing databases
-gain the table at startup; rollback is safe because old code ignores it and old
-tables are unchanged. Operation summaries are removed from the ordinary packet
-batch after the atomic snapshot write, so the new retained data is one bounded
-latest summary per configured node instead of a copy every 15 minutes.
-Successful worker revisions are acknowledged only after the transaction that
-stores the outbox batch and latest snapshot succeeds, so persistence failures
-are retried.
-The privacy validation change uses operations snapshot schema 2. Existing schema
-1 cache rows are discarded and not exported, because those rows predate strict
-value checks; the next scheduled collection repopulates the cache. The additive
-table itself is retained and remains backward-compatible for rollback.
-
-The authenticated fixed-purpose endpoint is `POST /v1/operations` with `{}`;
-`python monitoring/read_remote.py operations --origin <HTTPS-origin>` reads it.
-External clients receive only this allowlisted aggregate under the existing
-Monitor read key; they never receive or use the Supervisor token. Publishing
-this new scope requires the separate `operations_remote_enabled` opt-in. Do not
-enable remote access, add secrets, change routes, or enlarge the Supervisor
-role as part of this code change. The current manifest already declares
-`homeassistant_api: true`, `hassio_api: true`, and `hassio_role: default`.
-Supervisor's default role permits fixed info routes, including known add-on
-`/info`; the current collector checks only Monitor and the configured
-`target_slug` controller. Other add-ons are unmonitored and must not be inferred
-healthy. The collector does not enumerate apps. It does not permit add-on listing, `/available_updates`, or add-on
-`/logs` and `/stats`. Update metadata is therefore derived only from Core,
-Supervisor, OS and known add-on info responses. The supported versions of
-`/available_updates` use `update_type`, `panel_path`, and `version_latest`, but
-this endpoint is not called under the default role.
-
-The Supervisor add-on Core WebSocket proxy is `ws://supervisor/core/websocket`,
-authenticated with the injected Supervisor token and `homeassistant_api: true`.
-It is used only with fixed read commands (`system_log/list`,
-`repairs/list_issues`, `persistent_notification/get`, and `backup/info`). Core
-2026.10.4 requires administrator access for `system_log/list` and `backup/info`;
-the injected proxy token carries a high-impact Core permission boundary. It is
-never returned or exposed through the external API, and there is no general
-service-call or arbitrary command proxy. The add-on manifest permissions are
-unchanged. The Core endpoint/schema has a 2026.10.4 fixture; installed Supervisor
-compatibility still needs validation against the deployed installation.
-
-Only aggregate log severity, repair severity/count, and notification count are
-exported. Notification and log contents are not. API values do not prove
-physical device operation or backup restorability. HA UI remains necessary for
-detailed diagnosis, repair actions and visual verification.
-
-The manifest's current capabilities are `homeassistant_api: true`,
-`hassio_api: true`, and `hassio_role: default`; this change does not alter them.
-The actual Core API proxy permissions must be validated on the installation.
-Missing backup sensors are `unsupported`, not evidence that backups are absent.
-
-The Shelly Cloud adapter is not enabled or configured. Its cloud authentication
-key can also control devices, and no read-only scope, account server, or safely
-injected credential is currently verified. No Shelly keys were read or created.
-
 Each Monday at **08:00 Asia/Seoul**, the local worker obtains the public master sources,
 sends a bounded redacted report and sources to the OpenAI Responses API (`store: false`),
 and keeps the Korean analysis/evidence in HA. OpenAI processes the submitted data; this is
@@ -371,7 +278,7 @@ scratch file working today does not prove future scheduled executions can access
 Report unavailable credentials/data as a blocked analysis, not as a healthy system.
 
 
-## Elevator labels, car-entry investigation and storage (Monitor 0.7.0)
+## Elevator labels, packet candidate discovery and storage (Monitor 0.7.3 candidate)
 
 The operator confirmed `33:01:43:01` and `33:01:C3:03` as elevator-call-related
 traffic. Reports identify them as elevator call/arrival-related signal and call
@@ -397,6 +304,49 @@ exception if that configuration otherwise excludes this endpoint.
 <epoch>` uses the same read key and response signature checks as other reads.
 No read key grants actuation rights.
 
+The Monitor 0.7.3 candidate adds `미해석 패킷 후보 · 최근 24시간` to the existing
+HA-authenticated ingress dashboard (`/` via **Open Web UI**). It compares candidate
+5-minute profiles with neighboring buckets and up to seven prior same-KST-time
+windows, requiring at least six complete same-time baselines. Steady high-volume
+profiles alone are suppressed. The page displays bucket ranges, adjacent counts,
+baseline coverage, and a neutral question about remembered activity. A bucket is
+complete only when its leading `PACKET_WINDOW` agrees with the unique profile count
+and total frames and no `PACKET_OVERFLOW` occurred. Missing, partial, conflicting,
+overflowed or truncated windows cannot establish zero historical traffic. The configured
+seven-day baseline horizon is distinct from each candidate's actually observed
+complete same-time windows. An unrelated incomplete historical bucket no longer blocks
+a candidate whose local current/control windows and at least six same-time baselines are
+complete; current and historical incomplete counts remain visible. A contiguous newly
+observed signature is consolidated into one sustained episode range instead of producing
+a candidate for each five-minute bucket. Regularly recurring fingerprint-only candidates
+are grouped in a lower-priority list with cadence, counts, controls and bounded example
+times. Local/count changes and patterns with fewer than five occurrences stay in the
+primary list. Grouping does not erase archived profiles or ignore signatures. It also shows
+up to three raw examples already present in each source profile for local review;
+no new bytes are collected or retained. The signed `/v1/candidates` route returns
+the same bounded candidates without raw examples. `/v1/action-window` compares a
+reported event time with nearby profiles and waits through the flush and collector
+delay of the final intersecting bucket. Neither route controls HA or devices.
+
+The producer retains only eight SHA-256 fingerprints per signature per bucket;
+fingerprints cannot be decoded into floor/location values. Existing profile raw
+examples can be compared against repeated, operator-confirmed locations, but at most
+three examples per bucket may miss values. Exact floor decoding needs repeated raw
+samples tied to independently known floors; no new retention or API key is required
+for the current local Ingress view. Collector/profile gaps and incomplete same-time
+baselines must be checked before interpreting an empty result.
+
+The signed read-only `POST /v1/action-window` supports follow-up analysis after an
+operator reports an approximate action time. Use
+`monitoring/read_remote.py action-window --origin <HTTPS-origin> --action bell|door_open|elevator_arrival|elevator_location|other --at <epoch>`;
+`--radius` is optional (30–300 seconds, default 120). The response returns bounded
+signatures, counts, fingerprints and collection/profile coverage fields, never raw
+packet samples. The reported label and nearby profiles remain a hypothesis. Compare
+multiple action windows with control windows before classifying a pattern. Five-minute
+bucket counts may overlap the requested interval; missing source or packet-profile
+windows limit negative conclusions. This endpoint is read-only and has no HA or
+device control path.
+
 EW11 0.0.16 also accepts `car_entry` on its existing `<HA_TOPIC>/packet/mark`
 MQTT topic (default `ezville/packet/mark`). Publish this observation label when
 an entry notification is seen; it invokes only the bounded existing capture,
@@ -419,3 +369,115 @@ and may describe the same filesystem: do not add their capacities together.
 The archive retention budget is distinct from disk capacity and DB physical
 size. Missing/inaccessible measurements must be reported as unavailable.
 Existing saved reports are not retroactively given fabricated storage values.
+
+## HA operations snapshot (opt-in remote read endpoint)
+
+The Monitor process can collect a privacy-minimized Home Assistant operations
+snapshot into the existing persistent SQLite archive. A separate worker samples
+up to 50 Core log entries every 15 minutes and stores only severity counts;
+arbitrary log text is never turned into outbound error codes. It also stores
+repair and persistent-notification counts, status/version/update metadata for
+the Monitor and the controller slug from the existing `target_slug` option,
+Core backup metadata or explicitly observed backup sensors, and storage/host/
+resolution observations. It does not call Supervisor add-on logs or stats.
+Supervisor `/host/info` reports total/free space in GiB; the summary converts those
+two validated values to bytes before exposing `disk_total_bytes` and
+`disk_free_bytes`.
+Unsupported endpoints, permission failures and timeouts remain explicit and are
+never reported as healthy. The single worker submits asynchronously with a
+bounded per-request budget; packet log cursor advancement never waits for it.
+The remote view includes last attempt/success/error and data age; a stopped
+collector is identified by stale heartbeat. Packet discovery remains separately
+collected.
+
+The worker uses per-operation socket and body-read deadlines, but a thread blocked
+inside platform DNS resolution cannot be forcibly cancelled by Python. If it
+exceeds its watchdog, the cache reports `worker_stuck` and does not start an
+unbounded queue of replacements; a process restart is needed to clear that
+blocked-worker state. This is a limit of the runtime, not a guarantee of a hard
+end-to-end deadline. WebSocket control ping/pong and fragmented text messages
+are handled within the same bounded message size. Log/repair/notification
+summaries are counts only: an item may be replaced while the count remains the
+same, so these summaries cannot promise per-item change detection.
+
+Collection and external summary publication are separate, default-off opt-ins:
+`operations_enabled` starts local reads; `operations_remote_enabled` permits the
+signed `/v1/operations` response and additionally requires existing
+`remote_enabled: true`. Only literal boolean `true` enables either setting.
+Missing settings in an existing 0.7.1 options file and malformed values keep
+both off. Disabling export suppresses old cached and persisted snapshots too.
+
+An additive `operations_snapshots` SQLite table stores one indexed latest record
+per node, independent of batch backlog and batch retention. Existing databases
+gain the table at startup; rollback is safe because old code ignores it and old
+tables are unchanged. Operation summaries are removed from the ordinary packet
+batch after the atomic snapshot write, so the new retained data is one bounded
+latest summary per configured node instead of a copy every 15 minutes.
+Successful worker revisions are acknowledged only after the transaction that
+stores the outbox batch and latest snapshot succeeds, so persistence failures
+are retried.
+The privacy validation change uses operations snapshot schema 2. Existing schema
+1 cache rows are discarded and not exported, because those rows predate strict
+value checks; the next scheduled collection repopulates the cache. The additive
+table itself is retained and remains backward-compatible for rollback.
+
+The authenticated fixed-purpose endpoint is `POST /v1/operations` with `{}`;
+`python monitoring/read_remote.py operations --origin <HTTPS-origin>` reads it.
+External clients receive only this allowlisted aggregate under the existing
+Monitor read key; they never receive or use the Supervisor token. Publishing
+this new scope requires the separate `operations_remote_enabled` opt-in. Do not
+enable remote access, add secrets, change routes, or enlarge the Supervisor
+role as part of this code change. The current manifest already declares
+`homeassistant_api: true`, `hassio_api: true`, and `hassio_role: default`.
+Supervisor's default role permits fixed info routes, including known add-on
+`/info`; the current collector checks only Monitor and the configured
+`target_slug` controller. Other add-ons are unmonitored and must not be inferred
+healthy. The collector does not enumerate apps. It does not permit add-on listing, `/available_updates`, or add-on
+`/logs` and `/stats`. Update metadata is therefore derived only from Core,
+Supervisor, OS and known add-on info responses. The supported versions of
+`/available_updates` use `update_type`, `panel_path`, and `version_latest`, but
+this endpoint is not called under the default role.
+
+The Supervisor add-on Core WebSocket proxy is `ws://supervisor/core/websocket`,
+authenticated with the injected Supervisor token and `homeassistant_api: true`.
+It is used only with fixed read commands (`system_log/list`,
+`repairs/list_issues`, `persistent_notification/get`, and `backup/info`). Core
+2026.10.4 requires administrator access for `system_log/list` and `backup/info`;
+the injected proxy token carries a high-impact Core permission boundary. It is
+never returned or exposed through the external API, and there is no general
+service-call or arbitrary command proxy. The add-on manifest permissions are
+unchanged. The Core endpoint/schema has a 2026.10.4 fixture; installed Supervisor
+compatibility still needs validation against the deployed installation.
+
+Only aggregate log severity, repair severity/count, and notification count are
+exported. Notification and log contents are not. API values do not prove
+physical device operation or backup restorability. HA UI remains necessary for
+detailed diagnosis, repair actions and visual verification.
+
+The manifest's current capabilities are `homeassistant_api: true`,
+`hassio_api: true`, and `hassio_role: default`; this change does not alter them.
+The actual Core API proxy permissions must be validated on the installation.
+Missing backup sensors are `unsupported`, not evidence that backups are absent.
+
+The Shelly Cloud adapter is not enabled or configured. Its cloud authentication
+key can also control devices, and no read-only scope, account server, or safely
+injected credential is currently verified. No Shelly keys were read or created.
+
+Each Monday at **08:00 Asia/Seoul**, the local worker obtains the public master sources,
+sends a bounded redacted report and sources to the OpenAI Responses API (`store: false`),
+and keeps the Korean analysis/evidence in HA. OpenAI processes the submitted data; this is
+not offline AI. Provider retention/billing policies still apply; ChatGPT Plus is not an API key.
+The model has **no tools**. Output is parsed as exact source replacements and checked for
+allowed paths, unique matches, deletion limits and Python syntax. Generated code is never
+executed on HA. Network/API failures have at most three attempts per week, one hour apart.
+An interrupted in-progress job requires inspection; it is not blindly re-billed after restart.
+A start after Monday 08:00 catches up the current week only. HA power/network outage delays
+analysis; this local-only configuration cannot independently detect a completely offline NUC.
+
+When publication is enabled, a complete week of observations, running add-on and matching
+installed/master version, causal evidence and no pending automated PR are required. The bot
+creates a dedicated branch, source commit, candidate patch-version/changelog update and a
+**draft PR**. It never writes master. PR text does not contain private analysis or raw logs.
+GitHub tests/builds run on that candidate; syntax validation is not regression validation.
+No automatic merge, release, install or rollback is enabled. Release remains the existing
+workflow after reviewed merge. An invalid or unproven proposal has no version bump.

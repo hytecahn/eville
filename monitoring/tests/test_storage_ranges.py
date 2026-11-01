@@ -11,13 +11,14 @@ import storage
 
 
 class StorageRangeTests(unittest.TestCase):
-    def add_profile_window(self, conn, node, bucket, signature, count, offset=0):
+    def add_profile_window(self, conn, node, bucket, signature, count, offset=0,
+                           variant='a' * 32, changes=0):
         started = bucket + offset
         window = {'start': started, 'end': started + 300, 'total': count, 'signatures': 1}
         profile = {'signature': signature, 'known': False, 'count': count,
                    'first': started + 10, 'last': started + 280,
-                   'bucket_start': started, 'variants': {'a' * 32: count},
-                   'other_variant_count': 0, 'variant_changes': 0, 'samples': ['F799010203AA']}
+                   'bucket_start': started, 'variants': {variant: count},
+                   'other_variant_count': 0, 'variant_changes': changes, 'samples': ['F799010203AA']}
         body = {'events': [
             {'kind': 'log', 'text': '[PACKET_WINDOW] ' + json.dumps(window)},
             {'kind': 'log', 'text': '[PACKET_PROFILE] ' + json.dumps(profile)},
@@ -75,6 +76,108 @@ class StorageRangeTests(unittest.TestCase):
             result = packet_ranges.discover_candidates(db, 'home', now)
             self.assertEqual(result['candidate_total'], 0)  # steady periodic high volume is normal
             self.assertTrue(result['observation_complete'])
+
+    def test_regular_variant_only_candidates_are_grouped_below_local_and_rare_candidates(self):
+        with tempfile.TemporaryDirectory() as name:
+            db = Path(name) / 'data.sqlite'
+            now = 8 * 86400 + 12 * 3600
+            end = int(now // 300) * 300
+            start = end - 24 * 3600
+            target = start + 3600
+            periodic_sig = '40:01:07:A5'
+            stable_variant = 'f' * 32
+            event_buckets = []
+            current_buckets = list(range(start, end, 300))
+            event_buckets = [bucket for bucket in current_buckets
+                             if bucket >= target and (bucket - target) % 600 == 0
+                             and bucket <= end - 600]
+            spike_bucket = target - 1800
+            with sqlite3.connect(db) as conn:
+                conn.execute('CREATE TABLE batches (node, collected, body)')
+                self.add_complete_current_coverage(conn, now, current_buckets)
+                for bucket in current_buckets:
+                    is_event = bucket in event_buckets
+                    count = 20 if bucket == spike_bucket else 2 if is_event else 1
+                    variant = (f'{bucket:032x}'[-32:] if is_event else stable_variant)
+                    self.add_profile_window(conn, 'home', bucket, periodic_sig, count, variant=variant)
+                for bucket in event_buckets:
+                    for day in range(1, 8):
+                        self.add_profile_window(conn, 'home', bucket - day * 86400,
+                                                periodic_sig, 2, variant=stable_variant)
+                for day in range(1, 8):
+                    self.add_profile_window(conn, 'home', spike_bucket - day * 86400,
+                                            periodic_sig, 2, variant=stable_variant)
+                # A local count spike in the recurring signature remains primary.
+            result = packet_ranges.discover_candidates(db, 'home', now)
+            groups = [item for item in result['periodic_variant_groups']
+                      if item['signature'] == periodic_sig]
+            self.assertEqual(len(groups), 1)
+            group = groups[0]
+            self.assertEqual(group['candidate_kind'], 'periodic_variant_only')
+            self.assertEqual(group['priority'], 'low')
+            self.assertEqual(group['cadence_seconds'], 600)
+            self.assertGreaterEqual(group['occurrence_count'], 5)
+            self.assertEqual(group['count_median'], 2)
+            self.assertEqual(group['control_before_median'], 1)
+            self.assertEqual(group['control_after_median'], 1)
+            self.assertEqual(group['same_slot_baseline_median'], 2)
+            self.assertEqual(group['variant_changes_total'], 0)
+            self.assertTrue(group['occurrence_examples_truncated'])
+            primary_periodic = [item for item in result['candidates']
+                                if item['signature'] == periodic_sig]
+            self.assertEqual(len(primary_periodic), 1)
+            self.assertEqual(primary_periodic[0]['bucket_start'], spike_bucket)
+            self.assertEqual(result['candidate_occurrences_total'],
+                             result['candidate_total'] + result['periodic_variant_occurrences_grouped'])
+
+    def test_fewer_than_five_variant_only_occurrences_stay_in_primary_candidates(self):
+        with tempfile.TemporaryDirectory() as name:
+            db = Path(name) / 'data.sqlite'
+            now = 8 * 86400 + 12 * 3600
+            end = int(now // 300) * 300
+            start = end - 24 * 3600
+            targets = [end - 7200, end - 6600, end - 6000, end - 5400]
+            with sqlite3.connect(db) as conn:
+                conn.execute('CREATE TABLE batches (node, collected, body)')
+                excluded = {bucket + delta for bucket in targets for delta in (-300, 0, 300)}
+                self.add_complete_current_coverage(conn, now, excluded)
+                for day in range(1, 8):
+                    for bucket in targets:
+                        self.add_profile_window(conn, 'home', bucket - day * 86400,
+                                                '40:01:07:A5', 2, variant='f' * 32)
+                for bucket in sorted(excluded):
+                    is_target = bucket in targets
+                    variant = f'{bucket:032x}'[-32:] if is_target else 'f' * 32
+                    self.add_profile_window(conn, 'home', bucket, '40:01:07:A5',
+                                            2 if is_target else 1, variant=variant)
+            result = packet_ranges.discover_candidates(db, 'home', now)
+            self.assertEqual(result['periodic_variant_group_total'], 0)
+            self.assertEqual(len([item for item in result['candidates']
+                                  if item['signature'] == '40:01:07:A5']), 4)
+
+    def test_irregular_variant_only_candidates_are_not_mislabeled_periodic(self):
+        starts = [0, 600, 1500, 2100, 3000]
+        items = [{'signature': '40:01:07:A5', 'candidate_signal': 'variant_only',
+                  'bucket_start': start, 'bucket_end': start + 300, 'count': 2,
+                  'control_before': 1, 'control_after': 1, 'same_slot_baseline_median': 2,
+                  'new_tracked_variants': 1, 'variant_changes': 0,
+                  'label': '미분류 패킷', 'category': 'unknown'} for start in starts]
+        primary, groups = packet_ranges.group_periodic_variant_candidates(items)
+        self.assertEqual(len(primary), 5)
+        self.assertEqual(groups, [])
+
+    def test_off_phase_rare_variant_occurrence_stays_primary_inside_periodic_run(self):
+        starts = sorted(list(range(0, 6600, 600)) + [3300])
+        items = [{'signature': '40:01:07:A5', 'candidate_signal': 'variant_only',
+                  'bucket_start': start, 'bucket_end': start + 300, 'count': 2,
+                  'control_before': 1, 'control_after': 1, 'same_slot_baseline_median': 2,
+                  'new_tracked_variants': 1, 'variant_changes': 0,
+                  'label': '미분류 패킷', 'category': 'unknown'} for start in starts]
+        primary, groups = packet_ranges.group_periodic_variant_candidates(items)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]['cadence_seconds'], 600)
+        self.assertEqual(groups[0]['occurrence_count'], 11)
+        self.assertEqual([item['bucket_start'] for item in primary], [3300])
 
     def test_equal_score_candidates_prefer_newer_window_over_old_high_volume(self):
         with tempfile.TemporaryDirectory() as name:
