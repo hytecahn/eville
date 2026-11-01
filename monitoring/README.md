@@ -159,6 +159,8 @@ exported. Notification and log contents are not. API values do not prove
 physical device operation or backup restorability. HA UI remains necessary for
 detailed diagnosis, repair actions and visual verification.
 
+The Shelly adapter and external credentials remain disabled and unconfigured. A Shelly cloud `auth_key` can control devices; a dedicated read-only scope and safe credential injection have not been verified.
+
 The manifest's current capabilities are `homeassistant_api: true`,
 `hassio_api: true`, and `hassio_role: default`; this change does not alter them.
 The actual Core API proxy permissions must be validated on the installation.
