@@ -129,33 +129,29 @@ def recent(database, node, limit=20):
 
 
 def operations_snapshot(database, node):
-    """Return the latest persisted HA operations summary and collector freshness."""
+    """Return indexed operations data and independent collector freshness."""
     with closing(sqlite3.connect('file:' + str(database) + '?mode=ro', uri=True)) as db:
+        try:
+            row = db.execute('SELECT collected,body FROM operations_snapshots WHERE node=?', (node,)).fetchone()
+        except sqlite3.OperationalError:
+            return {'observation': 'unavailable', 'reason': 'operations_schema_not_migrated'}
         latest = db.execute('SELECT max(collected) FROM batches WHERE node=?', (node,)).fetchone()[0]
-        rows = db.execute('SELECT collected,body FROM batches WHERE node=? ORDER BY collected DESC LIMIT 2000', (node,))
-        row = None
-        batch = None
-        for candidate in rows:
-            try:
-                value = json.loads(candidate[1])
-            except (ValueError, TypeError):
-                continue
-            if value.get('operations') is not None:
-                row, batch = candidate, value
-                break
-    if row is None or batch is None:
+    if row is None:
         return {'observation': 'unavailable', 'reason': 'no_collection'}
-    operations = batch.get('operations')
-    age = None if latest is None else max(0, time.time() - latest)
-    if operations is None:
-        return {'observation': 'unavailable', 'reason': 'collector_not_yet_updated', 'collected_at': row[0], 'collector_age_seconds': age}
-    status = operations if isinstance(operations, dict) and 'summary' in operations else {
-        'summary': operations, 'last_success_at': batch.get('operations_collected_at'),
-        'last_attempt_at': batch.get('operations_collected_at'), 'last_error': None}
+    status = json.loads(row[1])
     data_age = None if status.get('last_success_at') is None else max(0, time.time() - status['last_success_at'])
-    return {'observation': 'available' if age is not None and age <= 180 and data_age is not None and data_age <= 1800 else 'stale',
+    collector_age = None if latest is None else max(0, time.time() - latest)
+    summary = status.get('summary')
+    section_observation = summary.get('observation', 'unavailable') if isinstance(summary, dict) else 'unavailable'
+    fresh = (collector_age is not None and collector_age <= 180 and data_age is not None
+             and data_age <= 1800 and section_observation != 'unavailable')
+    return {'observation': 'available' if fresh else 'stale',
+            'collected_at': row[0], 'collector_collected_at': latest, 'collector_age_seconds': collector_age,
+            'last_attempt_at': status.get('last_attempt_at'), 'last_success_at': status.get('last_success_at'),
+            'last_error': status.get('last_error'), 'data_age_seconds': data_age,
+            'revision': status.get('revision', 0), 'summary': summary}
 
-class LimitedServer(ThreadingHTTPServer):
+
 
 
 class LimitedServer(ThreadingHTTPServer):
