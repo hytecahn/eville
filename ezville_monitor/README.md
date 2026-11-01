@@ -1,4 +1,4 @@
-# EzVille Monitor 0.5.0
+# EzVille Monitor 0.7.1 candidate
 
 HAOS-local log collection and Monday 08:00 KST maintenance analysis.
 
@@ -41,6 +41,17 @@ exception if that configuration otherwise excludes this endpoint.
 <epoch>` uses the same read key and response signature checks as other reads.
 No read key grants actuation rights.
 
+The signed read-only `POST /v1/action-window` supports follow-up correlation after
+the operator reports an approximate action time. The `action-window` client accepts
+`--action bell|door_open|elevator_arrival|elevator_location|other`, `--at <epoch>`
+and an optional `--radius` from 30 to 300 seconds (default 120). It returns bounded
+signatures, counts, fingerprints and coverage/truncation fields; it never returns
+raw packet samples. The reported label and nearby profiles remain a hypothesis.
+Compare multiple action windows with control windows before classifying a pattern.
+Five-minute bucket counts may overlap the requested interval, and missing source or
+packet-profile windows limit negative conclusions. The endpoint is passive and has
+no HA or device control path.
+
 EW11 0.0.16 also accepts `car_entry` on its existing `<HA_TOPIC>/packet/mark`
 MQTT topic (default `ezville/packet/mark`). Publish this observation label when
 an entry notification is seen; it invokes only the bounded existing capture,
@@ -63,3 +74,23 @@ and may describe the same filesystem: do not add their capacities together.
 The archive retention budget is distinct from disk capacity and DB physical
 size. Missing/inaccessible measurements must be reported as unavailable.
 Existing saved reports are not retroactively given fabricated storage values.
+
+## Passive packet candidate discovery (Monitor 0.7.1)
+
+The HA-authenticated ingress page shows candidate packet windows from existing
+profiles, comparing each 5-minute bucket with adjacent buckets and up to seven
+prior same-time buckets. It requires at least six same-time baseline windows and
+suppresses steady high-volume signatures. Candidate time is shown as a 5-minute
+range, not an exact event time. The local HA ingress may show the already stored
+raw examples (up to three per profile) for interpretation; no additional samples
+are collected or retained. Signed remote candidate reads omit raw samples.
+
+The signed read-only `/v1/action-window` endpoint compares an operator-reported
+action time with nearby stored packet profiles. It returns bounded signature,
+count, fingerprint and coverage evidence; raw frames are not returned. Nearby
+profiles are candidate correlations only. Repeat the same action and compare
+control windows before assigning a meaning. No HA or device command is issued.
+The producer currently retains at most eight SHA-256 fingerprints per signature
+and bucket, so fingerprints cannot reveal byte values or floor numbers. The
+existing raw examples can be compared across repeated, user-confirmed floor
+observations, but three samples per bucket are not guaranteed to cover each value.

@@ -79,6 +79,37 @@ class RemoteTests(unittest.TestCase):
         request, _ = self.request('/v1/packets', {'start': now - 40, 'end': now - 10}, key='wrong')
         self.assertEqual(self.status(request), 401)
 
+    def test_action_window_returns_bounded_candidates_without_raw_samples(self):
+        now = time.time()
+        event_at = now - 180
+        item = {'signature': '99:01:02:00', 'known': False, 'count': 6,
+                'first': event_at - 20, 'last': event_at + 15,
+                'bucket_start': event_at - 60, 'samples': ['PRIVATE_RAW_FRAME'],
+                'variants': {'a' * 32: 4}, 'other_variant_count': 2, 'variant_changes': 1}
+        with self.db:
+            self.db.execute('INSERT INTO batches VALUES (?,?,?,?,?)', ('action', 'home', event_at, event_at,
+                json.dumps({'events': [{'kind': 'log', 'text': '[PACKET_PROFILE] ' + json.dumps(item)}]})))
+        result = self.read('/v1/action-window', {'action': 'bell', 'at': event_at, 'radius': 60})
+        self.assertEqual(result['reported_action'], 'bell')
+        self.assertEqual(result['candidate_profiles'][0]['signature'], '99:01:02:00')
+        self.assertIn('classification_basis', result['candidate_profiles'][0])
+        self.assertNotIn('PRIVATE_RAW_FRAME', json.dumps(result))
+        self.assertIn('repeated action and control windows', ' '.join(result['limitations']))
+        for payload in ({'action': 'door_open; inject', 'at': event_at},
+                        {'action': 'bell', 'at': event_at, 'radius': 1},
+                        {'action': 'bell', 'at': True}):
+            request, _ = self.request('/v1/action-window', payload)
+            self.assertEqual(self.status(request), 400)
+
+    def test_candidates_read_route_is_signed_and_read_only(self):
+        result = self.read('/v1/candidates', {'hours': 12})
+        self.assertEqual(result['candidate_total'], 0)
+        self.assertEqual(result['bucket_seconds'], 300)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM batches').fetchone()[0], 1)
+        for payload in ({'hours': 5}, {'hours': 25}, {'hours': 12, 'sql': 'DELETE'}):
+            request, _ = self.request('/v1/candidates', payload)
+            self.assertEqual(self.status(request), 400)
+
     def test_daily_read_exports_stored_storage_snapshot(self):
         day, start, end = daily.window(time.time())
         summary = daily.summarize(self.database, 'home', start, end)
@@ -305,6 +336,9 @@ class RemoteTests(unittest.TestCase):
             with urllib.request.urlopen(url + '/') as response:
                 page = response.read().decode()
                 self.assertIn('action="daily/run"', page)
+                self.assertIn('미해석 패킷 후보 · 최근 24시간', page)
+                self.assertIn('현재 기준으로 표시할 수 있는 패턴 후보가 없습니다.', page)
+                self.assertIn('층수 같은 숫자값을 해독할 수 없습니다.', page)
                 token = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
             wrong = urllib.request.Request(url + '/daily/run', b'csrf=wrong',
                 headers={'Content-Type': 'application/x-www-form-urlencoded'})

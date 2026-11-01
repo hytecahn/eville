@@ -15,7 +15,7 @@ from protocol import redact
 
 MAX_REQUEST = 1024
 MAX_RESPONSE = 262144
-PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily', '/v1/packets'}
+PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily', '/v1/packets', '/v1/action-window', '/v1/candidates'}
 ACTION_PATH = '/v1/daily/run'
 
 
@@ -52,7 +52,7 @@ def daily_snapshot(database, node, options, now):
             candidate.pop('sample', None)
     for call in summary['calls']:
         call.pop('request_id', None)
-    return {'node': node, 'monitor_version': '0.7.0', 'window_day': day,
+    return {'node': node, 'monitor_version': '0.7.1', 'window_day': day,
             'daily_enabled': bool(options.get('daily_enabled')) if options is not None else None,
             'mobile_notification_configured': bool(options.get('daily_notify_service')) if options is not None else None,
             'enabled_since': state.get('enabled_since'),
@@ -203,7 +203,11 @@ def handler(database, node, secret, options=None):
                 if not authenticated:
                     return self.reply(401, {}, action=action)
                 payload = json.loads(body)
-                if not isinstance(payload, dict) or set(payload) - ({'limit'} if self.path == '/v1/recent' else {'start', 'end'} if self.path == '/v1/packets' else set()):
+                allowed = ({'limit'} if self.path == '/v1/recent' else
+                           {'start', 'end'} if self.path == '/v1/packets' else
+                           {'action', 'at', 'radius'} if self.path == '/v1/action-window' else
+                           {'hours'} if self.path == '/v1/candidates' else set())
+                if not isinstance(payload, dict) or set(payload) - allowed:
                     return self.reply(400, {}, nonce, action=action)
                 if action:
                     from daily import run_daily, window
@@ -220,6 +224,13 @@ def handler(database, node, secret, options=None):
                 elif self.path == '/v1/packets':
                     from packet_ranges import read
                     result = read(database, node, payload.get('start'), payload.get('end'), now)
+                elif self.path == '/v1/action-window':
+                    from packet_ranges import compare_action
+                    result = compare_action(database, node, payload.get('action'),
+                                            payload.get('at'), now, payload.get('radius', 120))
+                elif self.path == '/v1/candidates':
+                    from packet_ranges import discover_candidates
+                    result = discover_candidates(database, node, now, payload.get('hours', 24))
                 elif self.path == '/v1/daily':
                     result = daily_snapshot(database, node, options, now)
                 else:
