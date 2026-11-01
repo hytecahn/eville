@@ -1,4 +1,4 @@
-# EzVille Monitor 0.7.2 candidate
+# EzVille Monitor 0.7.3 candidate
 
 HAOS-local log collection and Monday 08:00 KST maintenance analysis.
 
@@ -75,7 +75,7 @@ The archive retention budget is distinct from disk capacity and DB physical
 size. Missing/inaccessible measurements must be reported as unavailable.
 Existing saved reports are not retroactively given fabricated storage values.
 
-## Passive packet candidate discovery (Monitor 0.7.2)
+## Passive packet candidate discovery (Monitor 0.7.3)
 
 The HA-authenticated ingress page shows candidate packet windows from existing
 profiles, comparing each 5-minute bucket with adjacent buckets and up to seven
@@ -96,6 +96,11 @@ but does not suppress an otherwise supported candidate. The overall current-wind
 status and historical incomplete-window count remain visible. A contiguous newly
 observed signature is represented once as a sustained episode with its full
 5-minute bucket range, rather than as a separate action candidate for every bucket.
+Fingerprint-only candidates recurring regularly at least five times are shown in a
+separate low-priority group with occurrence totals, cadence, count/control medians,
+and bounded example times. Local/count changes and less frequent candidates remain
+in the primary list. This changes presentation priority only: original profiles
+remain archived and no signature is ignored or assigned a device meaning.
 
 The signed read-only `/v1/action-window` endpoint compares an operator-reported
 action time with nearby stored packet profiles. It returns bounded signature,

@@ -139,8 +139,11 @@ def handler(database, node, options=None):
                     candidate_report['older_rows_omitted_at_least']))
                 candidate_lines.append('기준선 설정 최대 {}일, 최소 {}일 · 실제 후보별 기준선 일수는 각 항목에 따로 표시'.format(
                     candidate_report['baseline_days_configured'], candidate_report['minimum_baseline_days_required']))
-                candidate_lines.append('발견 후보 {}개 · 화면에는 최대 20개 표시 · 제외 항목 {}'.format(
-                    candidate_report['candidate_total'],
+                candidate_lines.append('우선 검토 후보 {}개 · 주기 variant-only 그룹 {}개 / 발생 구간 {}개 · '
+                    '그룹 전 후보 발생 {}개 · 제외 항목 {}'.format(
+                    candidate_report['candidate_total'], candidate_report['periodic_variant_group_total'],
+                    candidate_report['periodic_variant_occurrences_grouped'],
+                    candidate_report['candidate_occurrences_total'],
                     json.dumps(candidate_report['candidate_suppressed_counts'], ensure_ascii=False, sort_keys=True)))
                 if candidate_report['candidate_list_truncated']:
                     candidate_lines.append('후보 응답 상한 50개에 도달해 일부 후보를 생략했습니다.')
@@ -164,7 +167,25 @@ def handler(database, node, options=None):
                     candidate_lines.append('이 시간대에 기억나는 행동이 있었나요? 확실하지 않으면 기억나지 않는다고 답해 주세요.')
                     if candidate.get('raw_samples'):
                         candidate_lines.append('HA 내부 기존 원문 표본(최대 3개): ' + ', '.join(candidate['raw_samples']))
-                if not candidate_report['candidates']:
+                groups = candidate_report['periodic_variant_groups']
+                if groups:
+                    candidate_lines.append('낮은 우선순위: 규칙적으로 반복되는 fingerprint-only 변형 그룹. 발생마다 행동 확인 질문을 반복하지 않습니다.')
+                    for group in groups[:10]:
+                        group_start = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(group['first_bucket_start'] + 9 * 3600))
+                        group_end = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(group['last_bucket_end'] + 9 * 3600))
+                        sample_times = ', '.join(time.strftime('%m-%d %H:%M',
+                            time.gmtime(item['bucket_start'] + 9 * 3600)) for item in group['occurrence_examples'])
+                        candidate_lines.append(
+                            '주기 변형 {} · {}회/약 {}분 · {}–{} KST · 개수 중앙값 {} · 이웃 중앙값 {}/{} · '
+                            '7일 동시간 중앙값 {} · variant_changes 합계 {} · 표본시각 {}'.format(
+                                group['signature'], group['occurrence_count'],
+                                round(group['cadence_seconds'] / 60), group_start, group_end,
+                                group['count_median'], group['control_before_median'],
+                                group['control_after_median'], group['same_slot_baseline_median'],
+                                group['variant_changes_total'], sample_times))
+                    if candidate_report['periodic_variant_groups_truncated']:
+                        candidate_lines.append('주기 변형 그룹 목록도 20개 상한으로 잘렸습니다.')
+                if not candidate_report['candidates'] and not groups:
                     candidate_lines.append('현재 기준으로 표시할 수 있는 패턴 후보가 없습니다.')
                 candidate_text = '\n'.join(candidate_lines)
                 body = ('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'

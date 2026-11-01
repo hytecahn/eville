@@ -278,7 +278,7 @@ scratch file working today does not prove future scheduled executions can access
 Report unavailable credentials/data as a blocked analysis, not as a healthy system.
 
 
-## Elevator labels, packet candidate discovery and storage (Monitor 0.7.2 candidate)
+## Elevator labels, packet candidate discovery and storage (Monitor 0.7.3 candidate)
 
 The operator confirmed `33:01:43:01` and `33:01:C3:03` as elevator-call-related
 traffic. Reports identify them as elevator call/arrival-related signal and call
@@ -304,7 +304,7 @@ exception if that configuration otherwise excludes this endpoint.
 <epoch>` uses the same read key and response signature checks as other reads.
 No read key grants actuation rights.
 
-The Monitor 0.7.2 candidate adds `미해석 패킷 후보 · 최근 24시간` to the existing
+The Monitor 0.7.3 candidate adds `미해석 패킷 후보 · 최근 24시간` to the existing
 HA-authenticated ingress dashboard (`/` via **Open Web UI**). It compares candidate
 5-minute profiles with neighboring buckets and up to seven prior same-KST-time
 windows, requiring at least six complete same-time baselines. Steady high-volume
@@ -318,7 +318,10 @@ complete same-time windows. An unrelated incomplete historical bucket no longer 
 a candidate whose local current/control windows and at least six same-time baselines are
 complete; current and historical incomplete counts remain visible. A contiguous newly
 observed signature is consolidated into one sustained episode range instead of producing
-a candidate for each five-minute bucket. It also shows
+a candidate for each five-minute bucket. Regularly recurring fingerprint-only candidates
+are grouped in a lower-priority list with cadence, counts, controls and bounded example
+times. Local/count changes and patterns with fewer than five occurrences stay in the
+primary list. Grouping does not erase archived profiles or ignore signatures. It also shows
 up to three raw examples already present in each source profile for local review;
 no new bytes are collected or retained. The signed `/v1/candidates` route returns
 the same bounded candidates without raw examples. `/v1/action-window` compares a
