@@ -84,6 +84,11 @@ suppresses steady high-volume signatures. Candidate time is shown as a 5-minute
 range, not an exact event time. The local HA ingress may show the already stored
 raw examples (up to three per profile) for interpretation; no additional samples
 are collected or retained. Signed remote candidate reads omit raw samples.
+The leading `PACKET_WINDOW` marker must agree with the number and total frame
+counts of unique `PACKET_PROFILE` records, and the bucket must have no
+`PACKET_OVERFLOW`. Partial flushes, gaps and truncation are reported and suppress
+candidate discovery for an incomplete current observation window. The seven-day
+baseline setting is reported separately from the actual complete windows used.
 
 The signed read-only `/v1/action-window` endpoint compares an operator-reported
 action time with nearby stored packet profiles. It returns bounded signature,

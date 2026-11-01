@@ -123,17 +123,33 @@ def handler(database, node, options=None):
                     '후보 시각은 5분 프로파일 구간입니다. 정확한 행동 시각이나 패킷 의미를 확정하지 않습니다.',
                     '지문은 원시 바이트가 아니므로 층수 같은 숫자값을 해독할 수 없습니다.',
                     '완전한 관측 구간과 같은 시간대의 과거 기준선이 부족하면 후보 누락/오탐 가능성이 큽니다.',
-                    '관측 상태: {} · 완전한 프로파일 구간 {}개 · 누락 {}개 · 수집 공백 최대 {}초'.format(
+                    '관측 상태: {} · 완전한 프로파일 구간 {}개 · 불완전 프로파일 구간 {}개 '
+                    '· overflow 구간 {}개 · 누락 {}개 · 수집 공백 최대 {}초 · 잘림 {}'.format(
                         '완전' if candidate_report['observation_complete'] else '불완전',
-                        candidate_report['complete_profile_buckets'], candidate_report['missing_profile_buckets'],
-                        candidate_report['collector_max_gap_seconds'])]
+                        candidate_report['complete_profile_buckets'], candidate_report['incomplete_profile_windows'],
+                        candidate_report['overflowed_profile_windows'], candidate_report['missing_profile_buckets'],
+                        candidate_report['collector_max_gap_seconds'],
+                        '있음' if candidate_report['truncated'] else '없음')]
+                candidate_lines.append('DB 행 검사 {}/{}개 · 일치 행 최소 {}개 · 오래된 생략 최소 {}개'.format(
+                    candidate_report['batches_scanned'], candidate_report['batch_scan_limit'],
+                    candidate_report['matching_rows_detected_at_least'],
+                    candidate_report['older_rows_omitted_at_least']))
+                candidate_lines.append('기준선 설정 최대 {}일, 최소 {}일 · 실제 후보별 기준선 일수는 각 항목에 따로 표시'.format(
+                    candidate_report['baseline_days_configured'], candidate_report['minimum_baseline_days_required']))
+                candidate_lines.append('발견 후보 {}개 · 화면에는 최대 20개 표시 · 제외 항목 {}'.format(
+                    candidate_report['candidate_total'],
+                    json.dumps(candidate_report['candidate_suppressed_counts'], ensure_ascii=False, sort_keys=True)))
+                if candidate_report['candidate_list_truncated']:
+                    candidate_lines.append('후보 응답 상한 50개에 도달해 일부 후보를 생략했습니다.')
                 for candidate in candidate_report['candidates'][:20]:
-                    start_text = time.strftime('%Y-%m-%d %H:%M', time.gmtime(candidate['bucket_start'] + 9 * 3600))
-                    end_text = time.strftime('%H:%M', time.gmtime(candidate['bucket_end'] + 9 * 3600))
+                    start_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(candidate['bucket_start'] + 9 * 3600))
+                    end_text = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(candidate['bucket_end'] + 9 * 3600))
                     candidate_lines.append(
-                        '{}–{} KST · {} · 현재 {} / 앞 {} / 뒤 {} · 동일시각 기준 {}일'.format(
+                        '프로파일 구간 {}–{} KST · {} · 현재 {} / 앞 {} / 뒤 {} · '
+                        '동일시각 실제 기준선 {}일/{}개 구간'.format(
                             start_text, end_text, candidate['signature'], candidate['count'],
                             candidate['control_before'], candidate['control_after'],
+                            candidate['same_slot_baseline_days_observed'],
                             candidate['same_slot_baseline_buckets']))
                     candidate_lines.append('이 시간대에 기억나는 행동이 있었나요? 확실하지 않으면 기억나지 않는다고 답해 주세요.')
                     if candidate.get('raw_samples'):

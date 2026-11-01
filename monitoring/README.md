@@ -309,11 +309,18 @@ HA-authenticated ingress dashboard (`/` via **Open Web UI**). It compares candid
 5-minute profiles with neighboring buckets and up to seven prior same-KST-time
 windows, requiring at least six complete same-time baselines. Steady high-volume
 profiles alone are suppressed. The page displays bucket ranges, adjacent counts,
-baseline coverage, and a neutral question about remembered activity. It also shows
+baseline coverage, and a neutral question about remembered activity. A bucket is
+complete only when its leading `PACKET_WINDOW` agrees with the unique profile count
+and total frames and no `PACKET_OVERFLOW` occurred. Missing, partial, conflicting,
+overflowed or truncated windows cannot establish zero historical traffic; candidates
+are suppressed when the current 24-hour profile coverage is incomplete. The configured
+seven-day baseline horizon is distinct from each candidate's actually observed
+complete same-time windows. It also shows
 up to three raw examples already present in each source profile for local review;
 no new bytes are collected or retained. The signed `/v1/candidates` route returns
 the same bounded candidates without raw examples. `/v1/action-window` compares a
-reported event time with nearby profiles. Neither route controls HA or devices.
+reported event time with nearby profiles and waits through the flush and collector
+delay of the final intersecting bucket. Neither route controls HA or devices.
 
 The producer retains only eight SHA-256 fingerprints per signature per bucket;
 fingerprints cannot be decoded into floor/location values. Existing profile raw

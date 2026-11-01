@@ -101,6 +101,21 @@ class RemoteTests(unittest.TestCase):
             request, _ = self.request('/v1/action-window', payload)
             self.assertEqual(self.status(request), 400)
 
+    def test_action_window_reads_profile_after_event_window_until_bucket_flush(self):
+        now = time.time()
+        bucket = int((now - 3600) // 300) * 300
+        event_at = bucket + 120
+        item = {'signature': '99:01:02:00', 'known': False, 'count': 1,
+                'first': bucket + 100, 'last': bucket + 130, 'bucket_start': bucket,
+                'samples': ['F799010203AA'], 'variants': {'a' * 32: 1},
+                'other_variant_count': 0, 'variant_changes': 0}
+        with self.db:
+            self.db.execute('INSERT INTO batches VALUES (?,?,?,?,?)', ('late-flush', 'home', bucket + 301, bucket + 301,
+                json.dumps({'events': [{'kind': 'log', 'text': '[PACKET_PROFILE] ' + json.dumps(item)}]})))
+        result = self.read('/v1/action-window', {'action': 'bell', 'at': event_at, 'radius': 30})
+        self.assertEqual(result['candidate_total'], 1)
+        self.assertEqual(result['candidate_profiles'][0]['signature'], '99:01:02:00')
+
     def test_candidates_read_route_is_signed_and_read_only(self):
         result = self.read('/v1/candidates', {'hours': 12})
         self.assertEqual(result['candidate_total'], 0)
