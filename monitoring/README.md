@@ -107,13 +107,62 @@ interrupted `running` reports need manual inspection to avoid duplicate phone pu
 
 ## HA operations snapshot (opt-in remote read endpoint)
 
-The Monitor stores a privacy-minimized Home Assistant operations summary in its existing persistent SQLite archive. A separate worker samples at most 50 log rows every 15 minutes with one worker and a seven-second caller wait budget; packet log cursor collection does not wait for a slow operations request. The cache persists with each telemetry batch and restores after restart. The authenticated `POST /v1/operations` endpoint exposes status, last attempt/success/error, and data age.
+The Monitor process can collect a privacy-minimized Home Assistant operations
+snapshot into the existing persistent SQLite archive. A separate worker samples
+up to 50 Core log entries every 15 minutes and stores only severity counts;
+arbitrary log text is never turned into outbound error codes. It also stores
+repair and persistent-notification counts, status/version/update metadata for
+the Monitor and the controller slug from the existing `target_slug` option,
+Core backup metadata or explicitly observed backup sensors, and storage/host/
+resolution observations. It does not call Supervisor add-on logs or stats.
+Unsupported endpoints, permission failures and timeouts remain explicit and are
+never reported as healthy. The single worker submits asynchronously with a
+bounded per-request budget; packet log cursor advancement never waits for it.
+The remote view includes last attempt/success/error and data age; a stopped
+collector is identified by stale heartbeat. Packet discovery remains separately
+collected.
 
-The current manifest already declares `homeassistant_api: true`, `hassio_api: true`, and `hassio_role: default`; this change does not enlarge permissions. Core 2026.10.4 source shows `system_log/list` and `repairs/list_issues` are WebSocket commands; `system_log/list` is admin-only. `persistent_notification/get` is WebSocket-only. This addon has no evidenced Core WebSocket proxy, so those fields are explicitly unsupported until a validated transport exists. Core REST `/states` is used only to select exact backup-sensor and disk-sensor IDs; attributes, notification text, and all other entities are discarded. Backup timestamps and manager state are included when sensors exist; attempt outcome is unavailable because the richer `backup/info` WebSocket command is admin-only. Timestamps do not prove successful restoration.
+An additive `operations_snapshots` SQLite table stores one indexed latest record
+per node, independent of batch backlog and batch retention. Existing databases
+gain the table at startup; rollback is safe because old code ignores it and old
+tables are unchanged. Storage grows by one bounded summary per configured node.
+Successful worker revisions are acknowledged only after the transaction that
+stores the outbox batch and latest snapshot succeeds, so persistence failures
+are retried.
 
-Supervisor endpoints are fixed to an internal host and static paths, GET-only, redirect-disabled, one-second per-request timeout, one-megabyte response cap, and explicit response status parsing. Add-on probes use a fixed slug allowlist. Update names are allowlisted identifiers. No raw log lines, settings, credentials, person/presence, location, voice, or account data enter the summary. Missing schemas and denied permissions remain unavailable; endpoint compatibility beyond the Core 2026.10.4 fixtures remains subject to HA installation validation. The Shelly adapter and external credentials remain disabled and unconfigured.
+The authenticated fixed-purpose endpoint is `POST /v1/operations` with `{}`;
+`python monitoring/read_remote.py operations --origin <HTTPS-origin>` reads it.
+It uses the existing read key when the remote API is already enabled. Do not
+enable remote access, add secrets, change routes, or enlarge the Supervisor
+role as part of this code change. The current manifest already declares
+`homeassistant_api: true`, `hassio_api: true`, and `hassio_role: default`.
+Supervisor's default role permits fixed info routes, including known add-on
+`/info`; it does not permit add-on listing, `/available_updates`, or add-on
+`/logs` and `/stats`. Update metadata is therefore derived only from Core,
+Supervisor, OS and known add-on info responses. The supported versions of
+`/available_updates` use `update_type`, `panel_path`, and `version_latest`, but
+this endpoint is not called under the default role.
 
-The existing signed read key is used only if remote access was already configured. This code does not enable remote access, add keys, adjust routes, expand roles, or deploy the add-on. API state does not establish physical device operation or backup restorability; HA UI remains necessary for detailed diagnosis, repairs and visual verification.
+The Supervisor add-on Core WebSocket proxy is `ws://supervisor/core/websocket`,
+authenticated with the injected Supervisor token and `homeassistant_api: true`.
+It is used only with fixed read commands (`system_log/list`,
+`repairs/list_issues`, `persistent_notification/get`, and `backup/info`). Core
+2026.10.4 requires administrator access for `system_log/list` and `backup/info`;
+the injected proxy token carries a high-impact Core permission boundary. It is
+never returned or exposed through the external API, and there is no general
+service-call or arbitrary command proxy. The add-on manifest permissions are
+unchanged. The Core endpoint/schema has a 2026.10.4 fixture; installed Supervisor
+compatibility still needs validation against the deployed installation.
+
+Only aggregate log severity, repair severity/count, and notification count are
+exported. Notification and log contents are not. API values do not prove
+physical device operation or backup restorability. HA UI remains necessary for
+detailed diagnosis, repair actions and visual verification.
+
+The manifest's current capabilities are `homeassistant_api: true`,
+`hassio_api: true`, and `hassio_role: default`; this change does not alter them.
+The actual Core API proxy permissions must be validated on the installation.
+Missing backup sensors are `unsupported`, not evidence that backups are absent.
 
 ## Weekly job
 
