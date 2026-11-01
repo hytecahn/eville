@@ -1,0 +1,53 @@
+{
+  "home_assistant_core": "2026.10.4",
+  "upgrade_0_7_1_options": {"remote_enabled": true, "target_slug": "8a83e751_simple_mqtt_ezville_control"},
+  "source_refs": {
+    "backup_websocket": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/backup/websocket.py",
+    "backup_sensor": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/backup/sensor.py",
+    "persistent_notification": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/persistent_notification/__init__.py",
+    "supervisor_default_role": "https://github.com/home-assistant/supervisor/blob/main/supervisor/api/middleware/security.py",
+    "supervisor_websocket_proxy": "https://github.com/home-assistant/supervisor/blob/main/supervisor/api/proxy.py",
+    "addon_websocket_guide": "https://contributors.home-assistant.io/apps/guides/communication/"
+  },
+  "websocket_admin_or_auth_required": [
+    "persistent_notification/get",
+    "persistent_notification/subscribe",
+    "backup/info",
+    "system_log/list",
+    "repairs/list_issues"
+  ],
+  "websocket_auth": {
+    "system_log/list": {"admin_required": true},
+    "repairs/list_issues": {"admin_required": false},
+    "backup/info": {"admin_required": true},
+    "persistent_notification/get": {"admin_required": false}
+  },
+  "backup/info": {
+    "admin_required": true,
+    "fields": ["backups", "last_attempted_automatic_backup", "last_completed_automatic_backup", "next_automatic_backup", "state"],
+    "manager_states": ["idle", "create_backup", "blocked", "receive_backup", "restore_backup"]
+  },
+  "backup_sensors": [
+    "sensor.backup_backup_manager_state",
+    "sensor.backup_next_scheduled_automatic_backup",
+    "sensor.backup_last_successful_automatic_backup",
+    "sensor.backup_last_attempted_automatic_backup"
+  ],
+  "persistent_notification/get": {
+    "message_contents_returned_by_protocol": true,
+    "implementation_exports": "count_only"
+  },
+  "supervisor_role_default": {
+    "allows_addon_info_pattern": true,
+    "allows_addons_collection": false,
+    "allows_available_updates": false,
+    "allows_addon_logs_or_stats": false,
+    "manifest_permissions_changed": false
+  },
+  "available_update_item_fields": ["update_type", "panel_path", "version_latest"],
+  "implementation_paths": {
+    "websocket": "ws://supervisor/core/websocket",
+    "supervisor_http_base": "http://supervisor",
+    "supervisor_allowlisted_paths": ["/core/info", "/supervisor/info", "/os/info", "/host/info", "/resolution/info", "/addons/{known-slug}/info"]
+  }
+}
