@@ -28,14 +28,19 @@ def persist(db, retention_days=30, max_storage_mb=256):
     with db:
         for batch_id, body in db.execute('SELECT id,body FROM outbox ORDER BY rowid').fetchall():
             batch = json.loads(body)
+            operations = batch.get('operations')
+            packet_batch = dict(batch)
+            packet_batch.pop('operations', None)
+            packet_batch.pop('operations_collected_at', None)
             db.execute('INSERT OR IGNORE INTO batches VALUES (?,?,?,?,?)',
-                       (batch_id, batch['node'], batch['collected_at'], now, body.decode()))
-            if batch.get('operations') is not None:
+                       (batch_id, batch['node'], batch['collected_at'], now,
+                        json.dumps(packet_batch, separators=(',', ':'))))
+            if operations is not None:
                 db.execute('''INSERT INTO operations_snapshots(node,collected,body) VALUES (?,?,?)
                     ON CONFLICT(node) DO UPDATE SET collected=excluded.collected,body=excluded.body
                     WHERE excluded.collected >= operations_snapshots.collected''',
                     (batch['node'], batch.get('operations_collected_at') or batch['collected_at'],
-                     json.dumps(batch['operations'], separators=(',', ':'))))
+                     json.dumps(operations, separators=(',', ':'))))
             db.execute('DELETE FROM outbox WHERE id=?', (batch_id,))
         db.execute('DELETE FROM batches WHERE collected < ?', (now - retention_days * 86400,))
         # A logical byte budget; SQLite reuses freed pages. WAL/filesystem overhead is extra.
