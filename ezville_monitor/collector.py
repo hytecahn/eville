@@ -88,16 +88,18 @@ def operations_packet_status(operations, slug):
     summary = operations.get('summary') if isinstance(operations, dict) else None
     sections = summary.get('sections', {}) if isinstance(summary, dict) else {}
     core = summary.get('core', {}) if isinstance(summary, dict) else {}
+    core_observation = sections.get('core_info', 'unavailable')
+    if isinstance(core_observation, dict):
+        core_observation = core_observation.get('observation', 'unavailable')
     addon = next((item for item in summary.get('addons', {}).get('addons', [])
                   if item.get('slug') == slug), None) if isinstance(summary, dict) else None
     addon_info = addon.get('info', {}) if isinstance(addon, dict) else {'observation': 'unsupported'}
     return {
-        'core': {'observation': sections.get('core_info', 'unavailable'),
+        'core': {'observation': core_observation,
                  **({'version': core['version']} if core.get('version') is not None else {})},
         'addon': {'observation': addon_info.get('observation', 'unavailable'),
                   **{key: addon_info[key] for key in ('state', 'version') if key in addon_info}},
     }
-
 
 
 def main():
@@ -135,8 +137,8 @@ def main():
     while not stop.is_set():
         full = False
         try:
-            # HA operations calls run in a separate worker/cache; packet cursor advancement
-            # submits work and never waits for the HA request to finish.
+            # HA operations calls run in a separate, bounded worker/cache so their
+            # timeouts cannot delay packet-log cursor advancement.
             operations = poll_operations(os.environ['SUPERVISOR_TOKEN'], executor=operations_executor,
                                          target_slug=options.get('target_slug', ''))
             status = operations_packet_status(operations, options.get('target_slug', ''))
