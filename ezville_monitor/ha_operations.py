@@ -67,6 +67,8 @@ def safe_timestamp(value):
 
 
 def safe_number(value, minimum=0, maximum=2**63 - 1):
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
