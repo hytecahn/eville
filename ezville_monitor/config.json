@@ -26,6 +26,8 @@
     "publish_pr": false,
     "ai_model": "gpt-5.4",
     "remote_enabled": false,
+    "operations_enabled": false,
+    "operations_remote_enabled": false,
     "remote_action_secret": "",
     "daily_enabled": false,
     "daily_notify_service": ""
@@ -43,6 +45,8 @@
     "github_token": "password?",
     "ai_model": "str",
     "remote_enabled": "bool",
+    "operations_enabled": "bool",
+    "operations_remote_enabled": "bool",
     "remote_secret": "password?",
     "remote_action_secret": "password?",
     "daily_enabled": "bool",

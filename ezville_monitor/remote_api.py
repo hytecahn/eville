@@ -15,7 +15,7 @@ from protocol import redact
 
 MAX_REQUEST = 1024
 MAX_RESPONSE = 262144
-PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily', '/v1/packets', '/v1/action-window', '/v1/candidates'}
+PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily', '/v1/packets', '/v1/action-window', '/v1/candidates', '/v1/operations'}
 ACTION_PATH = '/v1/daily/run'
 
 
@@ -120,6 +120,43 @@ def recent(database, node, limit=20):
                     if len(events) >= limit:
                         return events
     return events
+
+
+def operations_snapshot(database, node, options=None):
+    """Return indexed operations data and independent collector freshness."""
+    from ha_operations import operations_options
+    if not operations_options(options)['remote_export']:
+        return {'observation': 'disabled'}
+    with closing(sqlite3.connect('file:' + str(database) + '?mode=ro', uri=True)) as db:
+        try:
+            row = db.execute('SELECT collected,body FROM operations_snapshots WHERE node=?', (node,)).fetchone()
+        except sqlite3.OperationalError:
+            return {'observation': 'unavailable', 'reason': 'operations_schema_not_migrated'}
+        latest = db.execute('SELECT max(collected) FROM batches WHERE node=?', (node,)).fetchone()[0]
+    if row is None:
+        return {'observation': 'unavailable', 'reason': 'no_collection'}
+    status = json.loads(row[1])
+    # Older snapshots predate strict field validation and must never be
+    # surfaced after an upgrade just because remote export is later enabled.
+    if not isinstance(status, dict) or status.get('schema') != 2:
+        return {'observation': 'unavailable', 'reason': 'snapshot_schema_unsupported'}
+    last_success = status.get('last_success_at')
+    valid_time = isinstance(last_success, (int, float)) and not isinstance(last_success, bool) and 0 <= last_success <= 1e12
+    data_age = None if not valid_time else time.time() - last_success
+    collector_age = None if latest is None else max(0, time.time() - latest)
+    summary = status.get('summary')
+    section_observation = summary.get('observation', 'unavailable') if isinstance(summary, dict) else 'unavailable'
+    last_error = status.get('last_error')
+    fresh = (collector_age is not None and collector_age <= 180 and data_age is not None
+             and 0 <= data_age <= 1800 and section_observation != 'unavailable'
+             and last_error in (None, 'partial_observation'))
+    safe_error = last_error if isinstance(last_error, str) and last_error in {
+        'collector_error', 'all_unavailable', 'partial_observation', 'worker_stuck', 'timeout'} else None
+    return {'observation': 'available' if fresh else 'stale',
+            'collected_at': row[0], 'collector_collected_at': latest, 'collector_age_seconds': collector_age,
+            'last_attempt_at': status.get('last_attempt_at'), 'last_success_at': status.get('last_success_at'),
+            'last_error': safe_error, 'data_age_seconds': data_age,
+            'revision': status.get('revision', 0), 'summary': summary}
 
 
 class LimitedServer(ThreadingHTTPServer):
@@ -233,6 +270,8 @@ def handler(database, node, secret, options=None):
                     result = discover_candidates(database, node, now, payload.get('hours', 24))
                 elif self.path == '/v1/daily':
                     result = daily_snapshot(database, node, options, now)
+                elif self.path == '/v1/operations':
+                    result = operations_snapshot(database, node, options)
                 else:
                     result = snapshot(database, node, now)
                     if self.path == '/v1/health':

@@ -43,7 +43,7 @@ def query(origin, key, endpoint, payload=None):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('endpoint',choices=['health','report','recent','daily','packets','action-window','candidates'])
+    p.add_argument('endpoint',choices=['health','report','recent','daily','packets','action-window','candidates','operations'])
     p.add_argument('--start', type=int, help='Packet range start, Unix seconds')
     p.add_argument('--end', type=int, help='Packet range end, Unix seconds')
     p.add_argument('--action', choices=['bell','door_open','elevator_arrival','elevator_location','other'])
