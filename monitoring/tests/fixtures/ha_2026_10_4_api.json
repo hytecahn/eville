@@ -6,6 +6,7 @@
     "backup_sensor": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/backup/sensor.py",
     "persistent_notification": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/persistent_notification/__init__.py",
     "supervisor_default_role": "https://github.com/home-assistant/supervisor/blob/main/supervisor/api/middleware/security.py",
+    "supervisor_host_info": "https://github.com/home-assistant/supervisor/blob/main/supervisor/host/info.py#L106-L123",
     "supervisor_websocket_proxy": "https://github.com/home-assistant/supervisor/blob/main/supervisor/api/proxy.py",
     "addon_websocket_guide": "https://contributors.home-assistant.io/apps/guides/communication/"
   },
@@ -49,5 +50,6 @@
     "websocket": "ws://supervisor/core/websocket",
     "supervisor_http_base": "http://supervisor",
     "supervisor_allowlisted_paths": ["/core/info", "/supervisor/info", "/os/info", "/host/info", "/resolution/info", "/addons/{known-slug}/info"]
-  }
+  },
+  "supervisor_host_disk_unit": "GiB"
 }
