@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'ezville_monitor'))
 import ha_operations as ha
 import remote_api
+import collector
 
 
 class OperationsTests(unittest.TestCase):
@@ -190,6 +191,17 @@ class OperationsTests(unittest.TestCase):
             '/core/info', '/supervisor/info', '/os/info', '/states', '/host/info', '/resolution/info',
             '/addons/8a83e751_ezville_monitor/info',
             '/addons/8a83e751_simple_mqtt_ezville_control/info'])
+
+    def test_packet_status_is_derived_from_operations_cache(self):
+        status = collector.operations_packet_status({'summary': {
+            'sections': {'core_info': 'available'}, 'core': {'version': '2026.10.4'},
+            'addons': {'observation': 'partial', 'addons': [
+                {'slug': 'configured_controller', 'info': {'observation': 'available',
+                                                            'state': 'started', 'version': '1.2'}}]}}},
+            'configured_controller')
+        self.assertEqual(status['core']['version'], '2026.10.4')
+        self.assertEqual(status['addon']['version'], '1.2')
+        self.assertEqual(status['addon']['observation'], 'available')
 
     def test_websocket_uses_fixed_supervisor_proxy_auth_and_read_allowlist(self):
         def server_frame(value):
