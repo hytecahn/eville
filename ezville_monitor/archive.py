@@ -17,6 +17,8 @@ from reports import report
 def initialize(db):
     db.execute('CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, node TEXT, collected REAL, received REAL, body TEXT)')
     db.execute('CREATE INDEX IF NOT EXISTS batches_window ON batches(node,collected)')
+    # Additive migration: latest operations summary is indexed independently of batches.
+    db.execute('CREATE TABLE IF NOT EXISTS operations_snapshots (node TEXT PRIMARY KEY, collected REAL NOT NULL, body TEXT NOT NULL)')
     db.commit()
 
 
@@ -28,6 +30,12 @@ def persist(db, retention_days=30, max_storage_mb=256):
             batch = json.loads(body)
             db.execute('INSERT OR IGNORE INTO batches VALUES (?,?,?,?,?)',
                        (batch_id, batch['node'], batch['collected_at'], now, body.decode()))
+            if batch.get('operations') is not None:
+                db.execute('''INSERT INTO operations_snapshots(node,collected,body) VALUES (?,?,?)
+                    ON CONFLICT(node) DO UPDATE SET collected=excluded.collected,body=excluded.body
+                    WHERE excluded.collected >= operations_snapshots.collected''',
+                    (batch['node'], batch.get('operations_collected_at') or batch['collected_at'],
+                     json.dumps(batch['operations'], separators=(',', ':'))))
             db.execute('DELETE FROM outbox WHERE id=?', (batch_id,))
         db.execute('DELETE FROM batches WHERE collected < ?', (now - retention_days * 86400,))
         # A logical byte budget; SQLite reuses freed pages. WAL/filesystem overhead is extra.
