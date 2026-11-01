@@ -43,6 +43,19 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(opener.request.get_method(), 'GET')
         self.assertEqual(result['version'], '2026.10.4')
 
+    def test_supervisor_host_disk_values_are_converted_from_gib_to_bytes(self):
+        fixture = json.loads((Path(__file__).parent / 'fixtures' / 'ha_2026_10_4_api.json').read_text())
+        self.assertEqual(fixture['supervisor_host_disk_unit'], 'GiB')
+        self.assertIn('/supervisor/host/info.py#L106-L123', fixture['source_refs']['supervisor_host_info'])
+        result = ha.compact_host({'observation': 'available', 'attempted': True, 'data': {
+            'disk_total': 100, 'disk_free': 25.5, 'private_field': 'NEVER_EXPORT'}})
+        self.assertEqual(result['disk_total_bytes'], 100 * 1024**3)
+        self.assertEqual(result['disk_free_bytes'], 25.5 * 1024**3)
+        self.assertNotIn('private_field', json.dumps(result))
+        invalid = ha.compact_host({'observation': 'available', 'attempted': True,
+                                   'data': {'disk_free': 'PRIVATE_TEXT'}})
+        self.assertNotIn('disk_free_bytes', invalid)
+
     def test_logs_never_return_raw_text_or_credentials(self):
         result = ha.compact_logs({'observation': 'available', 'data': {'messages': [
             'ERROR token=VerySecretTokenABC user=Alice', 'WARNING retry']}})
@@ -345,6 +358,19 @@ class OperationsTests(unittest.TestCase):
         poll.assert_not_called()
         self.assertIsNone(result)
 
+    def test_default_off_keeps_original_narrow_core_and_target_addon_health(self):
+        expected = {'core': {'observation': 'available', 'version': '2026.10.4'},
+                    'addon': {'observation': 'available', 'state': 'started', 'version': '1.2'}}
+        options = {'remote_enabled': True, 'target_slug': '8a83e751_simple_mqtt_ezville_control'}
+        with patch.object(collector, 'poll_operations_if_enabled', return_value=None) as operations, \
+                patch.object(collector, 'supervisor_status', return_value=expected) as legacy:
+            status, snapshot = collector.poll_monitor_status(options, 'SUPERVISOR_TOKEN')
+        self.assertEqual(status, expected)
+        self.assertIsNone(snapshot)
+        operations.assert_called_once_with(options, 'SUPERVISOR_TOKEN', executor=None,
+                                           target_slug=options['target_slug'])
+        legacy.assert_called_once_with(options['target_slug'], 'SUPERVISOR_TOKEN')
+
     def test_websocket_uses_fixed_supervisor_proxy_auth_and_read_allowlist(self):
         def server_frame(value, opcode=1, final=True):
             body = json.dumps(value, separators=(',', ':')).encode()
@@ -469,6 +495,54 @@ class OperationsTests(unittest.TestCase):
             self.assertEqual(json.loads(reopened.execute('SELECT body FROM operations_snapshots WHERE node=?',
                                                           ('home',)).fetchone()[0]), status)
             reopened.close()
+
+    def test_actual_poll_to_archive_remote_read_and_restore_preserves_snapshot_schema(self):
+        import sqlite3
+        import tempfile
+        import archive
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / 'archive.sqlite'
+            db = collector.connect(str(database))
+            archive.initialize(db)
+            now = time.time()
+            summary = {'schema': 2, 'observation': 'partial', 'core': {'version': '2026.10.4'}}
+            with ha._CACHE_LOCK:
+                ha._CACHE.update(summary=None, last_attempt_at=None,
+                                 last_success_at=None, last_error=None, running=False, revision=0)
+                ha._WORKER_STARTED_MONOTONIC = None
+                ha._WORKER_STUCK_BLOCKED = False
+                ha._WORKER_GENERATION += 1
+            with ThreadPoolExecutor(max_workers=1) as executor, patch.object(ha, 'collect', return_value=summary):
+                started = ha.poll_operations('SYNTHETIC_TOKEN', executor=executor,
+                                              now_fn=lambda: now, interval=900, target_slug='')
+                for _ in range(100):
+                    if not ha.cached_status()['running']:
+                        break
+                    time.sleep(.005)
+                self.assertFalse(ha.cached_status()['running'])
+                status = ha.poll_operations('SYNTHETIC_TOKEN', executor=executor,
+                                            now_fn=lambda: now + 1, interval=900, target_slug='')
+            self.assertEqual(status['schema'], 2)
+            self.assertEqual(status['summary'], summary)
+            collector.collect(db, str(Path(tmp) / 'no-packet-log'), 'home', time.time(),
+                              status={'observation': 'available'}, operations=status)
+            archive.persist(db)
+            persisted = json.loads(db.execute(
+                'SELECT body FROM operations_snapshots WHERE node=?', ('home',)).fetchone()[0])
+            self.assertEqual(persisted['schema'], 2)
+            options = {'remote_enabled': True, 'operations_enabled': True,
+                       'operations_remote_enabled': True}
+            remote = remote_api.operations_snapshot(str(database), 'home', options)
+            self.assertEqual(remote['summary'], summary)
+            self.assertEqual(remote['observation'], 'available')
+            with ha._CACHE_LOCK:
+                ha._CACHE.update(schema=1, summary=None, last_attempt_at=None,
+                                 last_success_at=None, last_error=None, running=False)
+            self.assertTrue(ha.restore_cache(db, 'home'))
+            restored = ha.cached_status()
+            self.assertEqual(restored['schema'], 2)
+            self.assertEqual(restored['summary'], summary)
+            db.close()
 
     def test_remote_operations_route_is_authenticated_and_fixed_read(self):
         import sqlite3
