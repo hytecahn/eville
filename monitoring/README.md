@@ -404,7 +404,9 @@ both off. Disabling export suppresses old cached and persisted snapshots too.
 An additive `operations_snapshots` SQLite table stores one indexed latest record
 per node, independent of batch backlog and batch retention. Existing databases
 gain the table at startup; rollback is safe because old code ignores it and old
-tables are unchanged. Storage grows by one bounded summary per configured node.
+tables are unchanged. Operation summaries are removed from the ordinary packet
+batch after the atomic snapshot write, so the new retained data is one bounded
+latest summary per configured node instead of a copy every 15 minutes.
 Successful worker revisions are acknowledged only after the transaction that
 stores the outbox batch and latest snapshot succeeds, so persistence failures
 are retried.
