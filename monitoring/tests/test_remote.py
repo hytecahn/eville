@@ -36,6 +36,20 @@ class RemoteTests(unittest.TestCase):
         self.collect()
         self.start()
 
+    def test_moes_signed_export_and_existing_report_path(self):
+        import moes_quality
+        self.stop()
+        self.start({'moes_quality_enabled': True})
+        moes_quality.initialize(self.db)
+        with self.db:
+            self.db.execute('INSERT INTO moes_runs VALUES (?,?,?,?,?)',
+                            ('test-slot', time.time(), time.time(), 'incomplete', '{}'))
+        result = self.read('/v1/moes-quality', {'slot': 'test-slot'})
+        self.assertEqual(result['runs'][0]['status'], 'incomplete')
+        self.assertEqual(self.read('/v1/report')['moes_quality']['runs'][0]['slot'], 'test-slot')
+        with self.assertRaises(urllib.error.HTTPError):
+            self.read('/v1/moes-quality', {'command': 'run'})
+
     def collect(self):
         collector.collect(self.db,str(self.log),'home',time.time(),status={'addon':{'state':'started','version':'0.0.13'}})
         archive.persist(self.db)
