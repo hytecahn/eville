@@ -1,6 +1,6 @@
 {
   "name": "EzVille Monitor",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "slug": "ezville_monitor",
   "description": "HA-local log archive, Monday 08:00 KST analysis and draft maintenance PRs",
   "arch": [
@@ -30,7 +30,9 @@
     "operations_remote_enabled": false,
     "remote_action_secret": "",
     "daily_enabled": false,
-    "daily_notify_service": ""
+    "daily_notify_service": "",
+    "moes_quality_enabled": false,
+    "moes_quality_verification_id": ""
   },
   "schema": {
     "log_path": "str",
@@ -50,9 +52,14 @@
     "remote_secret": "password?",
     "remote_action_secret": "password?",
     "daily_enabled": "bool",
-    "daily_notify_service": "str?"
+    "daily_notify_service": "str?",
+    "moes_quality_enabled": "bool",
+    "moes_quality_verification_id": "str?"
   },
   "ingress": true,
   "ingress_port": 8787,
-  "panel_icon": "mdi:heart-pulse"
+  "panel_icon": "mdi:heart-pulse",
+  "services": [
+    "mqtt:need"
+  ]
 }

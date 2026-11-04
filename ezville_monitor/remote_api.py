@@ -15,7 +15,7 @@ from protocol import redact
 
 MAX_REQUEST = 1024
 MAX_RESPONSE = 262144
-PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily', '/v1/packets', '/v1/action-window', '/v1/candidates', '/v1/operations'}
+PATHS = {'/v1/health', '/v1/report', '/v1/recent', '/v1/daily', '/v1/packets', '/v1/action-window', '/v1/candidates', '/v1/operations', '/v1/moes-quality'}
 ACTION_PATH = '/v1/daily/run'
 
 
@@ -243,7 +243,8 @@ def handler(database, node, secret, options=None):
                 allowed = ({'limit'} if self.path == '/v1/recent' else
                            {'start', 'end'} if self.path == '/v1/packets' else
                            {'action', 'at', 'radius'} if self.path == '/v1/action-window' else
-                           {'hours'} if self.path == '/v1/candidates' else set())
+                           {'hours'} if self.path == '/v1/candidates' else
+                           {'slot'} if self.path == '/v1/moes-quality' else set())
                 if not isinstance(payload, dict) or set(payload) - allowed:
                     return self.reply(400, {}, nonce, action=action)
                 if action:
@@ -270,6 +271,12 @@ def handler(database, node, secret, options=None):
                     result = discover_candidates(database, node, now, payload.get('hours', 24))
                 elif self.path == '/v1/daily':
                     result = daily_snapshot(database, node, options, now)
+                elif self.path == '/v1/moes-quality':
+                    from moes_quality import snapshot as moes_snapshot
+                    requested_slot = payload.get('slot')
+                    if requested_slot is not None and (not isinstance(requested_slot, str) or len(requested_slot) > 64):
+                        return self.reply(400, {}, nonce)
+                    result = moes_snapshot(database, options or {}, requested_slot)
                 elif self.path == '/v1/operations':
                     result = operations_snapshot(database, node, options)
                 else:
@@ -278,6 +285,8 @@ def handler(database, node, secret, options=None):
                         result = {key: result[key] for key in ('node', 'window_end','batch_count', 'log_line_count',
                             'latest_log_collected_at', 'collector_age_seconds', 'collector_receiving', 'latest_status', 'latest_source_exists')}
                     else:
+                        from moes_quality import snapshot as moes_snapshot
+                        result['moes_quality'] = moes_snapshot(database, options or {})
                         result['examples'] = [redact(item).encode()[:4096].decode('utf-8',errors='ignore') for item in result['examples']]
                 return self.reply(200, result, nonce)
             except (ValueError, TypeError, KeyError):

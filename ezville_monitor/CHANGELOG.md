@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.4
+
+- Add opt-in NUC-local MOES read measurements at KST 00/06/12/18, with durable per-attempt results and signed read-only reports.
+- Add an explicit one-time commissioning ID; restarts never repeat the same ID or scheduled slot.
+- Preserve existing telemetry and credentials; never send IR, pairing, leave or rejoin commands.
+
 ## 0.7.3
 
 - Aggregate regularly recurring fingerprint-only candidate windows into bounded, low-priority groups.

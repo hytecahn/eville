@@ -165,6 +165,9 @@ def main():
             # Fail closed for remote reads while preserving local collection.
             print('remote API not started: ' + type(error).__name__ + '; check remote_secret/listener configuration', flush=True)
     stop = threading.Event()
+    from moes_quality import worker as moes_worker
+    moes_thread = threading.Thread(target=moes_worker, args=(database, options, stop), daemon=True)
+    moes_thread.start()
     from maintenance import worker
     threading.Thread(target=worker, args=(database, options, stop), daemon=True).start()
     from ha_operations import cached_status, restore_cache
@@ -191,6 +194,7 @@ def main():
         except Exception as error:
             print('collection: {}'.format(type(error).__name__), flush=True)
         stop.wait(1 if full else options['poll_seconds'])
+    moes_thread.join(timeout=15)
     if remote_server:
         remote_server.shutdown()
         remote_server.server_close()

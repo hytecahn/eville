@@ -43,7 +43,8 @@ def query(origin, key, endpoint, payload=None):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('endpoint',choices=['health','report','recent','daily','packets','action-window','candidates','operations'])
+    p.add_argument('endpoint',choices=['health','report','recent','daily','packets','action-window','candidates','operations','moes-quality'])
+    p.add_argument('--slot', help='Exact KST run slot for archived MOES attempts')
     p.add_argument('--start', type=int, help='Packet range start, Unix seconds')
     p.add_argument('--end', type=int, help='Packet range end, Unix seconds')
     p.add_argument('--action', choices=['bell','door_open','elevator_arrival','elevator_location','other'])
@@ -55,7 +56,9 @@ def main():
     p.add_argument('--check',action='store_true',help='Return freshness exit status without exposing telemetry in CI logs')
     a=p.parse_args()
     key = a.key_file.read_text().strip() if a.key_file else os.environ['EZVILLE_REMOTE_SECRET']
-    if a.endpoint == 'packets':
+    if a.endpoint == 'moes-quality':
+        payload = {'slot': a.slot} if a.slot else {}
+    elif a.endpoint == 'packets':
         payload = {'start': a.start, 'end': a.end}
     elif a.endpoint == 'action-window':
         if a.action is None or a.at is None:
