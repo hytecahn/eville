@@ -71,4 +71,4 @@ only; p95 is nearest rank. Run completeness must be checked before comparison.
 
 Local check: `python3 -m unittest discover -s monitoring/tests -p 'test*.py'`.
 
-For commissioning, set `moes_quality_verification_id` to a unique 1–64 character ASCII alphanumeric/underscore/hyphen ID alongside enabling collection. Startup performs one explicitly labelled `verification:<id>` run, separate from scheduled slots. Reusing that ID cannot rerun it. Clear the option after verification. This remains the same fixed read-only benchmark, not an API trigger.
+For commissioning, set `moes_quality_verification_id` to a unique 1–48 character ASCII alphanumeric/underscore/hyphen ID alongside enabling collection. Startup performs one explicitly labelled `verification:<id>` run, separate from scheduled slots. Reusing that ID cannot rerun it. Clear the option after verification. This remains the same fixed read-only benchmark, not an API trigger.

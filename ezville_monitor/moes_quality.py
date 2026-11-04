@@ -262,7 +262,7 @@ def worker(database, options, stop):
             db.execute("UPDATE moes_runs SET status='interrupted',ended=? WHERE status='running'", (time.time(),))
     # Explicit commissioning request, persisted separately from scheduled slots.
     verification_id = options.get('moes_quality_verification_id', '')
-    if isinstance(verification_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', verification_id):
+    if isinstance(verification_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,48}', verification_id):
         run(database, 'verification:' + verification_id, stop,
             lambda: Session(credentials(os.environ['SUPERVISOR_TOKEN'])))
     while not stop.is_set():

@@ -136,7 +136,7 @@ class CommissioningTests(unittest.TestCase):
     def test_invalid_or_empty_verification_id_does_not_run(self):
         class Stopped(Stop):
             def is_set(self): return True
-        for value in ['', '../bad', 3, 'a'*65]:
+        for value in ['', '../bad', 3, 'a'*49]:
             with tempfile.TemporaryDirectory() as td, patch.object(m, 'run') as run:
                 m.worker(str(Path(td)/'test.sqlite'), {'moes_quality_enabled':True, 'moes_quality_verification_id':value}, Stopped())
                 run.assert_not_called()
