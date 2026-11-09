@@ -34,6 +34,7 @@ class FakeClient:
         self.__class__.instances.append(self)
 
     def username_pw_set(self, *args): pass
+    def will_set(self, *args, **kwargs): pass
     def reconnect_delay_set(self, **kwargs): pass
     def connect_async(self, *args, **kwargs): pass
     def subscribe(self, *args): return (0, 1)
@@ -89,17 +90,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.01)
         return FakeClient.instances[-1]
 
-    async def test_outage_alert_and_recovery_backoff_survive_session_restart(self):
+    async def test_ew11_outage_keeps_mqtt_session_alive(self):
         self.config['ew11_timeout'] = .05
         with patch.object(ezville.telnetlib, 'Telnet', side_effect=OSError('unreachable')) as reset:
             await self.start()
-            await self.wait_for(lambda: len(FakeClient.instances) >= 2)
             client = FakeClient.instances[-1]
-            await asyncio.sleep(.15)
-            statuses = [json.loads(p)['status'] for c in FakeClient.instances
-                        for t, p in c.publications if t == 'ezville/ew11/status']
-            self.assertEqual(statuses, ['offline'])
+            await self.wait_for(lambda: any(
+                t == 'ezville/ew11/status' and json.loads(p).get('recovery_result') == 'telnet_reset_failed'
+                for t, p in client.publications))
+            status_payloads = lambda: [json.loads(p) for c in FakeClient.instances
+                for t, p in c.publications if t == 'ezville/ew11/status']
+            def transitions():
+                values = [item['status'] for item in status_payloads()]
+                return [status for index, status in enumerate(values)
+                        if index == 0 or status != values[index - 1]]
+            self.assertEqual(transitions(), ['offline'])
             self.assertEqual(reset.call_count, 1)
+            self.assertEqual(len(FakeClient.instances), 1)
             async def healthy_bus():
                 while True:
                     client.emit('ew11/recv', bytes.fromhex(STATE))
@@ -112,10 +119,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 packets.cancel()
                 await asyncio.gather(packets, return_exceptions=True)
-            await self.wait_for(lambda: reset.call_count == 2)
-            statuses = [json.loads(p)['status'] for c in FakeClient.instances
-                        for t, p in c.publications if t == 'ezville/ew11/status']
-            self.assertEqual(statuses, ['offline', 'online', 'offline'])
+            await self.wait_for(lambda: len(transitions()) >= 3)
+            self.assertEqual(transitions(), ['offline', 'online', 'offline'])
+            await self.wait_for(lambda: status_payloads()[-1]['recovery_result'] == 'telnet_reset_failed')
+            self.assertEqual(status_payloads()[-1]['recovery_result'], 'telnet_reset_failed')
+            self.assertEqual(reset.call_count, 2)
+            self.assertEqual(len(FakeClient.instances), 1)
 
     async def exercise_rejected_status(self, rejected_status, recover_before_accept=False):
         self.config['ew11_timeout'] = .05
@@ -142,7 +151,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ezville.telnetlib, 'Telnet', side_effect=OSError('unreachable')) as reset:
             try:
                 await self.start()
-                await self.wait_for(lambda: len(FakeClient.instances) >= 2)
+                await self.wait_for(lambda: bool(rejected or accepted))
                 if rejected_status == 'online':
                     self.assertEqual(accepted, ['offline'])
                     packets = asyncio.create_task(healthy_bus())
@@ -204,7 +213,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(p for t, p in client.publications if t == config_topic), original_config)
         self.assertEqual(len(FakeClient.instances), 1)
         self.assertFalse(any(t == 'ew11/send' for t, _ in client.publications))
-        self.assertTrue(all(not retained for topic, retained in client.publication_retains if not topic.startswith('homeassistant/')))
+        self.assertTrue(all(not retained for topic, retained in client.publication_retains
+                            if topic.endswith('/command') or topic == 'ew11/send'))
 
     async def test_corrupt_fragment_does_not_poison_next_frame(self):
         client = await self.start()
@@ -287,9 +297,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(reset.call_count, 1)
             statuses = [json.loads(p)['status'] for c in FakeClient.instances
                         for t, p in c.publications if t == 'ezville/ew11/status']
-            self.assertEqual(statuses, ['offline'])
+            self.assertTrue(statuses)
+            self.assertEqual(set(statuses), {'offline'})
 
-    async def test_physical_recovery_survives_session_restart(self):
+    async def test_failed_physical_recovery_keeps_mqtt_session_alive(self):
         self.config['ew11_timeout'] = .05
         entered, release = asyncio.Event(), asyncio.Event()
         original = ezville.bounded_call
@@ -302,11 +313,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(ezville, 'bounded_call', delayed):
             await self.start()
             await self.wait_for(entered.is_set)
-            await self.wait_for(lambda: len(FakeClient.instances) >= 2)
-            # Old session has ended but the reset coroutine is still alive.
+            await asyncio.sleep(.03)
+            self.assertEqual(len(FakeClient.instances), 1)
             release.set()
             await self.wait_for(lambda: any('test reset completion' in l for l in self.logs))
-            self.assertTrue(any('유효 패킷 없음' in l for l in self.logs))
+            self.assertEqual(len(FakeClient.instances), 1)
 
     async def test_cleanup_timeout_exits_worker_instead_of_reusing_client(self):
         client = await self.start()

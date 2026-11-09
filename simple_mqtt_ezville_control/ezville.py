@@ -347,6 +347,10 @@ async def ezville_loop(config):
     ew11_status = 'online'
     pending_ew11_status = None
     next_ew11_recovery_time = 0.0
+    last_ew11_recovery_result = 'not_attempted'
+    last_ew11_recovery_error = ''
+    next_ew11_telemetry_time = time.monotonic() + min(EW11_TIMEOUT, 5)
+    next_stale_packet_report_time = 0.0
 
     # Paho의 자동 재접속 스레드까지 멈춘 경우를 감지하기 위한 상태값
     MQTT_RECONNECT_TIMEOUT = 120
@@ -361,7 +365,6 @@ async def ezville_loop(config):
     last_state_update_time = time.monotonic()
     last_valid_packet_time = time.monotonic()
     has_valid_packet = False
-    next_session_recovery_time = 0.0
     pending_elevator = None
     previous_batch_state = None
     HEALTH_CHECK_INTERVAL = min(5, EW11_TIMEOUT)  # Check valid bus traffic every five seconds.
@@ -402,6 +405,11 @@ async def ezville_loop(config):
             mqtt_connected = True
             mqtt_disconnected_time = None
             log('[INFO] MQTT Broker 연결 성공')
+            client.publish(HA_TOPIC + '/availability', 'online', retain=True)
+            try:
+                publish_ew11_discovery()
+            except Exception as error:
+                log('[ERROR] EW11 Discovery 발행 실패: {}'.format(error))
             session_loop.call_soon_threadsafe(reset_discovery)
             # Socket인 경우 MQTT 장치의 명령 관련과 MQTT Status (Birth/Last Will Testament) Topic만 구독
             if comm_mode == 'socket':
@@ -1052,6 +1060,7 @@ async def ezville_loop(config):
     # EW11 동작 상태를 체크해서 필요시 리셋 실시 및 HA에 상태 알림
     async def ew11_health_loop():
         nonlocal restart_flag, ew11_status, pending_ew11_status, next_ew11_recovery_time
+        nonlocal last_ew11_recovery_result, last_ew11_recovery_error, next_ew11_telemetry_time
 
         while True:
             timestamp = time.monotonic()
@@ -1070,26 +1079,32 @@ async def ezville_loop(config):
             observed_status = 'offline' if offline else 'online'
             if observed_status != ew11_status:
                 ew11_status = observed_status
-                # Keep only the latest observed state: replaying a stale offline
-                # after recovery could trigger an unnecessary HA power cycle.
-                pending_ew11_status = {'status': observed_status, 'timestamp': int(time.time())}
+                pending_ew11_status = True
                 if offline:
-                    pending_ew11_status.update(
-                        last_packet_time=int(time.time() - time_since_last_packet),
-                        last_packet_age=time_since_last_packet)
                     log('[WARNING] EW11 패킷 수신 타임아웃: {:.1f}초 동안 신호 없음'.format(time_since_last_packet))
                 else:
                     next_ew11_recovery_time = 0.0
+                    last_ew11_recovery_result = 'packet_resumed'
+                    last_ew11_recovery_error = ''
                     log('[INFO] EW11 패킷 수신 복구됨')
 
-            # Retry rejected notifications on each health check, independently
-            # of physical recovery. Pending state survives session recreation.
-            if pending_ew11_status is not None:
+            # Retain a fresh diagnostic snapshot periodically. The HA entities
+            # stay current through a bus outage and survive broker restarts.
+            if pending_ew11_status is not None or timestamp >= next_ew11_telemetry_time:
+                next_ew11_telemetry_time = timestamp + 30
+                status_payload = {
+                    'status': observed_status,
+                    'timestamp': int(time.time()),
+                    'last_packet_time': int(time.time() - time_since_last_packet),
+                    'last_packet_age': int(time_since_last_packet),
+                    'recovery_result': last_ew11_recovery_result,
+                    'recovery_error': last_ew11_recovery_error,
+                }
                 try:
-                    publish_checked(HA_TOPIC + '/ew11/status', json.dumps(pending_ew11_status))
-                    log('[INFO] EW11 {} 상태 MQTT 발행 접수'.format(pending_ew11_status['status']))
+                    publish_checked(HA_TOPIC + '/ew11/status', json.dumps(status_payload), retain=True)
                     pending_ew11_status = None
                 except Exception as _e:
+                    pending_ew11_status = True
                     log('[ERROR] EW11 상태 publish 실패; 재시도 대기: {}'.format(_e))
 
             if offline and timestamp >= next_ew11_recovery_time:
@@ -1097,10 +1112,18 @@ async def ezville_loop(config):
                 try:
                     log('[INFO] EW11 기기 재시작 시도')
                     await asyncio.wait_for(reset_EW11(), timeout=90)
+                    last_ew11_recovery_result = 'telnet_reset_accepted'
+                    last_ew11_recovery_error = ''
+                    # Only socket modes need a new stream after the gateway reboot.
+                    # MQTT mode must retain its broker session while the bus recovers.
+                    if comm_mode in ('socket', 'mixed'):
+                        restart_flag = True
+                    pending_ew11_status = True
                 except Exception as _e:
+                    last_ew11_recovery_result = 'telnet_reset_failed'
+                    last_ew11_recovery_error = str(_e)[:160]
+                    pending_ew11_status = True
                     log('[ERROR] EW11 기기 재시작 오류: {}'.format(_e))
-                finally:
-                    restart_flag = True
 
             # Check packet freshness every five seconds; preserve recovery cooldown.
             await asyncio.sleep(min(EW11_TIMEOUT, 5))
@@ -1125,7 +1148,7 @@ async def ezville_loop(config):
         
     # Addon 먹통 상태 감지 및 자동 리셋
     async def addon_health_loop():
-        nonlocal restart_flag, next_session_recovery_time
+        nonlocal next_stale_packet_report_time
         
         while True:
             timestamp = time.monotonic()
@@ -1134,12 +1157,9 @@ async def ezville_loop(config):
             # Unchanged but valid packets still prove that the bus is alive.
             time_since_activity = timestamp - last_valid_packet_time
             
-            if time_since_activity > HEALTH_CHECK_TIMEOUT and timestamp >= next_session_recovery_time:
-                next_session_recovery_time = timestamp + 60
-                log('[WARNING] Addon 먹통 감지: {}초 동안 유효 패킷 없음. 자동 리셋 트리거'.format(int(time_since_activity)))
-                log('[DEBUG] Last command time: {}, Last state update time: {}'.format(last_command_time, last_state_update_time))
-                restart_flag = True
-                await asyncio.sleep(0)
+            if time_since_activity > HEALTH_CHECK_TIMEOUT and timestamp >= next_stale_packet_report_time:
+                next_stale_packet_report_time = timestamp + 300
+                log('[WARNING] EW11 유효 패킷 {}초 동안 없음; MQTT 세션은 유지하고 EW11 상태 감시를 계속합니다'.format(int(time_since_activity)))
             elif time_since_activity <= HEALTH_CHECK_TIMEOUT and has_valid_packet:
                 if debug:
                     log('[DEBUG] Addon 상태 정상: 마지막 활동 이후 {:.1f}초 경과 (타임아웃: {}초)'.format(time_since_activity, HEALTH_CHECK_TIMEOUT))
@@ -1249,6 +1269,61 @@ async def ezville_loop(config):
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise ConnectionError('MQTT publish rejected rc={}'.format(result.rc))
 
+    def publish_ew11_discovery():
+        """Expose EW11 freshness and recovery outcome as stable HA entities."""
+        availability = {
+            'topic': HA_TOPIC + '/availability',
+            'payload_available': 'online',
+            'payload_not_available': 'offline',
+        }
+        device = {
+            'identifiers': ['ezville_ew11_health'],
+            'name': 'EzVille EW11 통신',
+            'manufacturer': 'EzVille',
+            'model': 'EW11 RS485 gateway',
+        }
+        entities = (
+            ('binary_sensor', 'connection', {
+                'name': 'EW11 통신 상태',
+                'device_class': 'connectivity',
+                'value_template': '{{ value_json.status }}',
+                'payload_on': 'online',
+                'payload_off': 'offline',
+            }),
+            ('sensor', 'last_valid_packet_age', {
+                'name': 'EW11 마지막 유효 패킷 경과',
+                'value_template': '{{ value_json.last_packet_age | int(0) }}',
+                'unit_of_measurement': 's',
+                'state_class': 'measurement',
+                'entity_category': 'diagnostic',
+                'icon': 'mdi:timer-sand',
+            }),
+            ('sensor', 'recovery_result', {
+                'name': 'EW11 최근 복구 결과',
+                'value_template': '{{ value_json.recovery_result }}',
+                'entity_category': 'diagnostic',
+                'icon': 'mdi:lan-disconnect',
+            }),
+            ('sensor', 'recovery_error', {
+                'name': 'EW11 최근 복구 오류',
+                'value_template': '{{ value_json.recovery_error | default("없음") }}',
+                'entity_category': 'diagnostic',
+                'icon': 'mdi:alert-circle-outline',
+            }),
+        )
+        for domain, object_id, fields in entities:
+            fields = dict(fields)
+            config = {
+                'name': fields.pop('name'),
+                'unique_id': 'ezville_ew11_' + object_id,
+                'state_topic': HA_TOPIC + '/ew11/status',
+                'availability': [availability],
+                'device': device,
+            }
+            config.update(fields)
+            topic = 'homeassistant/{}/ezville_ew11/{}/config'.format(domain, object_id)
+            publish_checked(topic, json.dumps(config), retain=True)
+
     async def restart_control():
         while not restart_flag and not (REBOOT_CONTROL and ADDON_STARTED and not MQTT_ONLINE):
             await asyncio.sleep(RESTART_CHECK_DELAY)
@@ -1317,6 +1392,7 @@ async def ezville_loop(config):
             # A fresh client includes a fresh socket, reconnect state and network thread.
             mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='mqtt-ezville')
             mqtt_client.username_pw_set(config['mqtt_id'], config['mqtt_password'])
+            mqtt_client.will_set(HA_TOPIC + '/availability', 'offline', qos=1, retain=True)
             mqtt_client.on_connect = on_connect
             mqtt_client.on_disconnect = on_disconnect
             mqtt_client.on_message = on_message
@@ -1349,6 +1425,7 @@ async def ezville_loop(config):
                     soc = None
                 client = mqtt_client
                 def close_mqtt():
+                    client.publish(HA_TOPIC + '/availability', 'offline', retain=True)
                     client.disconnect()
                     client.loop_stop()
                 # Cleanup failure escapes this loop. Parent restarts the worker.

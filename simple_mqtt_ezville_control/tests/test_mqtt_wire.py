@@ -86,6 +86,12 @@ class MQTTWireTests(unittest.IsolatedAsyncioTestCase):
                 config_topic = 'homeassistant/climate/ezville_wallpad/ezville_thermostat_01_01/config'
                 self.assertIn((config_topic, True), retention_flags)
                 self.assertIn((topic, False), retention_flags)
+                self.assertIn(('homeassistant/binary_sensor/ezville_ew11/connection/config', True), retention_flags)
+                self.assertIn(('homeassistant/sensor/ezville_ew11/last_valid_packet_age/config', True), retention_flags)
+                self.assertIn(('homeassistant/sensor/ezville_ew11/recovery_result/config', True), retention_flags)
+                self.assertIn(('homeassistant/sensor/ezville_ew11/recovery_error/config', True), retention_flags)
+                self.assertTrue(any(t == 'ezville/availability' and retained
+                                    for t, retained in retention_flags))
                 await asyncio.sleep(.05)
                 publications.clear()
                 writers[0].close()

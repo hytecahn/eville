@@ -1,3 +1,10 @@
+## 0.0.21
+
+- EW11 Telnet reset 거부/실패 시 MQTT 통신 세션을 반복 재시작하던 문제를 수정했습니다. MQTT 모드에서는 브로커 세션을 유지하고, socket/mixed 모드는 reset 성공 후에만 스트림을 재연결합니다.
+- 유효 EW11 패킷 부재는 MQTT 연결 장애와 분리해 감시합니다. 패킷이 돌아오지 않는 동안 매분 세션을 끊던 복구 루프를 제거하고 실제 MQTT 장기 단절만 세션 복구 대상으로 유지합니다.
+- EW11 연결 상태, 마지막 유효 패킷 경과 시간, 최근 복구 결과와 구체적인 복구 오류를 MQTT Discovery 진단 엔티티로 추가합니다. 상태 텔레메트리는 retained로 발행하며 애드온 availability를 함께 제공합니다.
+- Telnet reset 실패 메시지를 `recovery_error`에 보존하여 HA에서 원격 장치가 세션을 거부하는지 확인할 수 있게 합니다.
+
 ## 0.0.20
 
 - Check checksum-valid EW11 traffic every 5 seconds; default soft reconnect after 30 seconds and EW11 reset after 45 seconds. Existing installations must set `ew11_timeout` to 45; saved options are not silently overwritten. Physical reset retries have a separate 120-second cooldown.
