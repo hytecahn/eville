@@ -7,6 +7,8 @@ import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
 import unittest
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,6 +44,47 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(opener.request.full_url, 'http://supervisor/core/info')
         self.assertEqual(opener.request.get_method(), 'GET')
         self.assertEqual(result['version'], '2026.10.4')
+
+    def test_real_http_body_completion_and_limits(self):
+        # urllib closes its socket after the final Content-Length byte. Mocks
+        # with only read() never exercised the production read1() branch.
+        payload = b'{"result":"ok","data":{"version":"2026.11.0"}}'
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                if self.path == '/chunked':
+                    self.send_header('Transfer-Encoding', 'chunked')
+                elif self.path != '/eof':
+                    self.send_header('Content-Length', str(len(payload) + (10 if self.path == '/truncated' else 0)))
+                self.end_headers()
+                if self.path == '/chunked':
+                    self.wfile.write(('%x\r\n' % len(payload)).encode() + payload + b'\r\n0\r\n\r\n')
+                else:
+                    self.wfile.write(payload)
+            def log_message(self, *_): pass
+        server = HTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for path in ('/length', '/chunked', '/eof', '/truncated'):
+                with self.subTest(path=path):
+                    with ha.urllib.request.urlopen('http://127.0.0.1:%s%s' % (server.server_port, path)) as response:
+                        if path == '/truncated':
+                            with self.assertRaises(ha.APIError):
+                                ha._read_response(response, 1024, 1)
+                        else:
+                            self.assertEqual(ha._read_response(response, 1024, 1), payload)
+            with ha.urllib.request.urlopen('http://127.0.0.1:%s/length' % server.server_port) as response:
+                with self.assertRaises(ha.APIError):
+                    ha._read_response(response, len(payload) - 1, 1)
+            # Also exercise the full request/JSON/envelope path.
+            base = 'http://127.0.0.1:%s' % server.server_port
+            with patch.object(ha, 'SUPERVISOR_BASE', base):
+                self.assertEqual(ha.request(base, '/core/info', 'test-only')['version'], '2026.11.0')
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_supervisor_host_disk_values_are_converted_from_gib_to_bytes(self):
         fixture = json.loads((Path(__file__).parent / 'fixtures' / 'ha_2026_10_4_api.json').read_text())
