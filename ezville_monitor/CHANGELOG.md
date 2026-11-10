@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.6
+
+- Accept validated Supervisor host capacity as a storage source when optional disk sensors are absent. Preserve source-level status and measurements.
+- Count structured Core logs by their declared severity; exception fields and message keywords no longer turn warnings into errors.
+
 ## 0.7.5
 
 - Fix operations HTTP reads incorrectly reported as unavailable after a complete Content-Length response closes its socket.

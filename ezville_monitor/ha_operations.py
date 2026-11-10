@@ -121,6 +121,28 @@ def operations_options(options):
                               and options.get('remote_enabled') is True)}
 
 
+def compact_storage(states, host):
+    """Accept observed disk sensors or validated Supervisor capacity as sources."""
+    sensors = states.get('storage', {})
+    fields = states.get('storage_fields_observed', [])
+    capacity = {key: host[key] for key in ('disk_total_bytes', 'disk_free_bytes') if key in host}
+    host_available = (host.get('observation') == 'available'
+                      and capacity.get('disk_total_bytes', 0) > 0
+                      and 0 <= capacity.get('disk_free_bytes', -1) <= capacity['disk_total_bytes'])
+    sensor_available = bool(fields)
+    observation = 'available' if sensor_available or host_available else (
+        states.get('observation', 'unavailable') if states.get('observation') != 'available'
+        else 'unavailable' if any(v.get('observation') == 'unavailable' for v in sensors.values())
+        or host.get('observation') == 'available' else host.get('observation', 'unsupported'))
+    return {'observation': observation,
+            'attempted': bool(states.get('attempted') or host.get('attempted')),
+            'disk_sensors': sensors, 'fields_observed': fields,
+            'sources_observed': (['disk_sensors'] if sensor_available else []) + (['host'] if host_available else []),
+            'host_capacity': ({'observation': 'available', **capacity} if host_available else
+                              {'observation': 'unavailable' if host.get('observation') == 'available'
+                               else host.get('observation', 'unsupported')})}
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -357,9 +379,15 @@ def compact_logs(result):
     counts = {'error': 0, 'warning': 0, 'other': 0}
     codes = set()
     for item in entries:
-        line = item if isinstance(item, str) else json.dumps(item, ensure_ascii=True)
-        upper = line.upper()
-        level = 'error' if re.search(r'\b(ERROR|EXCEPTION|CRITICAL)\b', upper) else 'warning' if re.search(r'\bWARNING\b', upper) else 'other'
+        if isinstance(item, dict):
+            # HA supplies a structured level. The field name "exception" and
+            # message text must never promote a WARNING/INFO entry to ERROR.
+            severity = str(item.get('level', '')).upper()
+            level = ('error' if severity in {'ERROR', 'CRITICAL', 'FATAL'} else
+                     'warning' if severity in {'WARNING', 'WARN'} else 'other')
+        else:
+            upper = item.upper() if isinstance(item, str) else ''
+            level = 'error' if re.search(r'\b(ERROR|EXCEPTION|CRITICAL)\b', upper) else 'warning' if re.search(r'\bWARNING\b', upper) else 'other'
         counts[level] += 1
         # Never derive outbound identifiers from arbitrary log text. Severity
         # counts are the only exported log content until a fixed code registry exists.
@@ -640,12 +668,7 @@ def collect(token, previous=None, deadline=None, request_fn=None, target_slug=''
                                     else 'unavailable'),
                     'attempted': any(r.get('attempted', False) for r in (core_info, supervisor_info, os_info)),
                     'items': updates, 'count': len(updates)},
-        'storage': {'observation': ('available' if any(value.get('observation') == 'available'
-                                                       for value in state_summary.get('storage', {}).values()) else
-                                    state_summary['observation'] if state_summary['observation'] != 'available' else 'unsupported'),
-                    'attempted': state_summary.get('attempted', False),
-                    'disk_sensors': state_summary.get('storage', {}),
-                    'fields_observed': state_summary.get('storage_fields_observed', [])},
+        'storage': compact_storage(state_summary, compact_host(host)),
         'host': compact_host(host),
         'resolution': list_summary(resolution, 'unhealthy', 'unhealthy_count'),
         'limitations': ['Collected API state does not prove physical device operation or backup restorability.',

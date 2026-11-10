@@ -382,7 +382,14 @@ Core backup metadata or explicitly observed backup sensors, and storage/host/
 resolution observations. It does not call Supervisor add-on logs or stats.
 Supervisor `/host/info` reports total/free space in GiB; the summary converts those
 two validated values to bytes before exposing `disk_total_bytes` and
-`disk_free_bytes`.
+`disk_free_bytes`. Valid total/free host capacity also satisfies the storage
+observation when optional disk sensors are absent. `storage.sources_observed`
+identifies the source; `disk_sensors` keeps its individual statuses and
+`host_capacity` exports only validated capacity. Missing or inconsistent host
+capacity never fabricates a healthy storage observation. Structured Core log
+entries are counted using their declared `level`, not words in their message
+or the presence of an `exception` field. Counts represent sampled entries,
+not lifetime occurrence totals or proof that each issue is still active.
 Unsupported endpoints, permission failures and timeouts remain explicit and are
 never reported as healthy. The single worker submits asynchronously with a
 bounded per-request budget; packet log cursor advancement never waits for it.
