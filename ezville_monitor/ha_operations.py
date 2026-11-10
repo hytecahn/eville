@@ -143,12 +143,20 @@ def _read_response(response, limit, timeout):
         return raw
     raw = bytearray()
     while len(raw) <= limit:
+        # HTTPResponse.read1 closes fp/socket at a complete Content-Length.
+        # Check completion before touching the captured (now closed) socket.
+        if getattr(response, 'isclosed', lambda: False)():
+            if getattr(response, 'length', None) not in (None, 0):
+                raise APIError('unavailable')
+            return bytes(raw)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise APIError('timeout')
         sock.settimeout(remaining)
         part = read_chunk(min(8192, limit + 1 - len(raw)))
         if not part:
+            if getattr(response, 'length', None) not in (None, 0):
+                raise APIError('unavailable')
             return bytes(raw)
         raw.extend(part)
     raise APIError('unavailable')

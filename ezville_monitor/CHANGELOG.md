@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.5
+
+- Fix operations HTTP reads incorrectly reported as unavailable after a complete Content-Length response closes its socket.
+- Reject truncated HTTP response bodies and retain bounded size/read deadlines.
+- Add real HTTP regression coverage for Content-Length, chunked, EOF-delimited and truncated responses.
+
 ## 0.7.4
 
 - Add opt-in NUC-local MOES read measurements at KST 00/06/12/18, with durable per-attempt results and signed read-only reports.
