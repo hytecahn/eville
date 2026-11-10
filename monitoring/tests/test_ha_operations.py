@@ -108,6 +108,65 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(result['error_codes'], [])
         self.assertEqual(result['counts']['error'], 1)
 
+    def test_structured_log_level_is_not_inferred_from_exception_or_message(self):
+        result = ha.compact_logs({'observation': 'available', 'data': [
+            {'level': 'WARNING', 'message': ['Connection error'], 'exception': ''},
+            {'level': 'ERROR', 'message': ['Failed'], 'exception': ''},
+            {'level': 'INFO', 'message': ['Previous ERROR recovered'], 'exception': 'private'},
+            {'level': 'CRITICAL', 'message': ['Failed']},
+            {'message': ['ERROR unknown level'], 'exception': ''}]})
+        self.assertEqual(result['counts'], {'error': 2, 'warning': 1, 'other': 2})
+        self.assertNotIn('private', json.dumps(result))
+
+    def test_storage_accepts_valid_host_without_optional_sensors(self):
+        states = ha.summarize_states({'observation': 'available', 'attempted': True, 'data': []})
+        host = ha.compact_host({'observation': 'available', 'attempted': True,
+                                'data': {'disk_total': 228.5, 'disk_free': 173.5}})
+        result = ha.compact_storage(states, host)
+        self.assertEqual(result['observation'], 'available')
+        self.assertEqual(result['sources_observed'], ['host'])
+        self.assertEqual(result['disk_sensors']['disk_free']['observation'], 'unsupported')
+        self.assertEqual(result['host_capacity']['disk_free_bytes'], int(173.5 * 1024**3))
+
+    def test_storage_does_not_fabricate_capacity_or_hide_source_failures(self):
+        states = ha.summarize_states({'observation': 'available', 'attempted': True, 'data': []})
+        for data in ({}, {'disk_total': 100}, {'disk_total': 0, 'disk_free': 0},
+                     {'disk_total': 100, 'disk_free': 101}, {'disk_total': 'nan', 'disk_free': 5}):
+            result = ha.compact_storage(states, ha.compact_host({'observation': 'available', 'data': data}))
+            self.assertEqual(result['observation'], 'unavailable', data)
+            self.assertEqual(result['sources_observed'], [])
+        for failure in ('permission_denied', 'timeout', 'unsupported'):
+            result = ha.compact_storage(states, {'observation': failure, 'attempted': True})
+            self.assertEqual(result['observation'], failure)
+        result = ha.compact_storage({'observation': 'permission_denied', 'attempted': True},
+                                    {'observation': 'available', 'disk_total_bytes': 100, 'disk_free_bytes': 25})
+        self.assertEqual(result['observation'], 'available')
+        self.assertEqual(result['sources_observed'], ['host'])
+
+    def test_storage_keeps_sensor_source_when_host_is_unavailable(self):
+        states = ha.summarize_states({'observation': 'available', 'data': [
+            {'entity_id': 'sensor.disk_free', 'state': '20', 'attributes': {'unit_of_measurement': 'GB'}}]})
+        result = ha.compact_storage(states, {'observation': 'permission_denied'})
+        self.assertEqual(result['observation'], 'available')
+        self.assertEqual(result['sources_observed'], ['disk_sensors'])
+        self.assertEqual(result['host_capacity']['observation'], 'permission_denied')
+
+    def test_collection_is_complete_with_host_capacity_and_no_disk_sensors(self):
+        def request(base, path, token, payload=None, timeout=5):
+            if path == '/states':
+                return []
+            if path == '/host/info':
+                return {'disk_total': 200, 'disk_free': 150}
+            return {'version': '2026.11.0', 'state': 'started'}
+        def websocket(token, command, timeout=1):
+            return {'observation': 'available', 'attempted': True,
+                    'data': {'backups': [], 'state': 'idle'} if command == 'backup/info' else []}
+        with patch.object(ha, 'observe_ws', side_effect=websocket):
+            result = ha.collect('synthetic', request_fn=request)
+        self.assertEqual(result['observation'], 'available')
+        self.assertEqual(result['sections']['storage']['observation'], 'available')
+        self.assertEqual(result['storage']['sources_observed'], ['host'])
+
     def test_permission_and_timeout_are_not_success(self):
         with patch.object(ha, 'request', side_effect=ha.APIError('permission_denied')):
             self.assertEqual(ha.observe(ha.CORE_BASE, '/states', 't')['observation'], 'permission_denied')
